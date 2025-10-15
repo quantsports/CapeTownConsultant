@@ -1,0 +1,40 @@
+# Core dependencies
+openai
+python-dotenv
+requests
+
+# Optional dependencies
+pydantic
+
+# Testing
+pytest
+pytest-cov
+pytest-mock
+
+# Development
+black
+ruff
+mypy
+
+# Logging
+loguru
+colorama
+
+# Tokenization
+tiktoken
+numpy
+pandas
+
+# Vector database
+chromadb
+
+# Progress bars
+tqdm
+
+pinecone
+wikipedia
+tenacity
+httpx
+aiofiles
+aiolimiter
+streamlit

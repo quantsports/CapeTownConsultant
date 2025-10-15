@@ -1,0 +1,1197 @@
+
+"""
+Autonomous Personal Assistant - Production Ready (Fixed)
+Integrates: OpenAI, Perplexity, SerpAPI, Google Search, Pinecone
+"""
+
+import json
+import os
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Literal, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import asyncio
+import httpx
+from collections import OrderedDict
+from dotenv import load_dotenv,find_dotenv
+load_dotenv(find_dotenv())
+# External dependencies
+try:
+    from openai import AsyncOpenAI
+    from pinecone import Pinecone, ServerlessSpec
+    import wikipedia
+    from tenacity import retry, stop_after_attempt, wait_exponential
+    import aiofiles
+    import aiolimiter
+except ImportError as e:
+    print(f"Missing dependency: {e}")
+    print("Install with: pip install openai pinecone-client wikipedia pydantic tenacity httpx aiofiles aiolimiter")
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+class Config:
+    """Centralized configuration"""
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+    SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+    GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+    GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+    PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
+
+    PINECONE_INDEX = "assistant-memory"
+    PINECONE_DIMENSION = 1536
+    EMBEDDING_MODEL = "text-embedding-3-small"
+    CHAT_MODEL = "gpt-4o"
+
+    MAX_RETRIES = 2
+    TIMEOUT_SECONDS = 30
+    MAX_CONVERSATION_HISTORY = 20
+    CACHE_MAX_SIZE = 1000
+
+    # Rate limiting
+    OPENAI_RPM = 50
+    SERPAPI_RPM = 100
+    PERPLEXITY_RPM = 20
+
+    # Persistence
+    PROFILE_DIR = "./data/profiles"
+    CONVERSATION_DIR = "./data/conversations"
+
+
+# ============================================================================
+# DATA MODELS
+# ============================================================================
+
+class ToolType(str, Enum):
+    WEB_SEARCH = "web_search"
+    PERPLEXITY_SEARCH = "perplexity_search"
+    GOOGLE_SEARCH = "google_search"
+    WIKI_FETCH = "wiki_fetch"
+    MEMORY_QUERY = "memory_query"
+    MEMORY_UPSERT = "memory_upsert"
+    PROFILE_READ = "profile_read"
+    PROFILE_WRITE = "profile_write"
+
+
+@dataclass
+class ToolResult:
+    """Result from a tool execution"""
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    citations: List[str] = None
+    source: Optional[str] = None
+
+    def __post_init__(self):
+        if self.citations is None:
+            self.citations = []
+
+
+@dataclass
+class Message:
+    """Conversation message"""
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    timestamp: datetime = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now(timezone.utc)
+
+
+class CitationManager:
+    """Manages citations and their references"""
+
+    def __init__(self):
+        self.citations: List[str] = []
+        self.citation_map: Dict[str, int] = {}
+
+    def add_citation(self, url: str) -> int:
+        """Add citation and return its reference number"""
+        if url in self.citation_map:
+            return self.citation_map[url]
+
+        self.citations.append(url)
+        ref_num = len(self.citations)
+        self.citation_map[url] = ref_num
+        return ref_num
+
+    def add_citations(self, urls: List[str]) -> List[int]:
+        """Add multiple citations"""
+        return [self.add_citation(url) for url in urls]
+
+    def format_citations(self) -> str:
+        """Format citations section"""
+        if not self.citations:
+            return ""
+
+        section = "\n\n---\n\n**Sources:**\n"
+        for i, url in enumerate(self.citations, 1):
+            section += f"[{i}] {url}\n"
+        return section
+
+    def clear(self):
+        """Clear all citations"""
+        self.citations.clear()
+        self.citation_map.clear()
+
+
+class LRUCache:
+    """Simple LRU cache with size limit"""
+
+    def __init__(self, max_size: int = 1000):
+        self.cache: OrderedDict = OrderedDict()
+        self.max_size = max_size
+
+    def get(self, key: str) -> Optional[Any]:
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return None
+
+    def set(self, key: str, value: Any):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+
+        if len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
+
+    def clear(self):
+        self.cache.clear()
+
+
+# ============================================================================
+# EMBEDDING SERVICE
+# ============================================================================
+
+class EmbeddingService:
+    """OpenAI embedding generation with LRU caching"""
+
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or Config.OPENAI_API_KEY
+        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.cache = LRUCache(max_size=Config.CACHE_MAX_SIZE)
+        self.rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
+
+    def _cache_key(self, text: str) -> str:
+        return hashlib.md5(text.encode()).hexdigest()
+
+    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def embed(self, text: str) -> List[float]:
+        """Generate embedding for text with caching"""
+        if not self.client:
+            raise ValueError("OpenAI API key not configured")
+
+        cache_key = self._cache_key(text)
+        cached = self.cache.get(cache_key)
+
+        if cached is not None:
+            return cached
+
+        async with self.rate_limiter:
+            try:
+                response = await self.client.embeddings.create(
+                    model=Config.EMBEDDING_MODEL,
+                    input=text[:8000]
+                )
+
+                embedding = response.data[0].embedding
+                self.cache.set(cache_key, embedding)
+                return embedding
+
+            except Exception as e:
+                raise Exception(f"Embedding generation failed: {str(e)}")
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts"""
+        if not self.client:
+            raise ValueError("OpenAI API key not configured")
+
+        results = []
+        to_embed = []
+        indices = []
+
+        for i, text in enumerate(texts):
+            cache_key = self._cache_key(text)
+            cached = self.cache.get(cache_key)
+
+            if cached is not None:
+                results.append(cached)
+            else:
+                to_embed.append(text[:8000])
+                indices.append(i)
+                results.append(None)
+
+        if to_embed:
+            async with self.rate_limiter:
+                try:
+                    response = await self.client.embeddings.create(
+                        model=Config.EMBEDDING_MODEL,
+                        input=to_embed
+                    )
+
+                    for idx, embedding_obj in zip(indices, response.data):
+                        embedding = embedding_obj.embedding
+                        results[idx] = embedding
+                        cache_key = self._cache_key(texts[idx])
+                        self.cache.set(cache_key, embedding)
+
+                except Exception as e:
+                    raise Exception(f"Batch embedding failed: {str(e)}")
+
+        return results
+
+
+# ============================================================================
+# SEARCH ENGINES
+# ============================================================================
+
+class SearchEngine:
+    """Unified search interface with rate limiting"""
+
+    def __init__(self):
+        self.serpapi_api_key = Config.SERPAPI_API_KEY
+        self.google_api_key = Config.GOOGLE_SEARCH_API_KEY
+        self.google_engine_id = Config.GOOGLE_SEARCH_ENGINE_ID
+        self.perplexity_key = Config.PERPLEXITY_API_KEY
+        self.http_client = None
+
+        # Rate limiters
+        self.serpapi_limiter = aiolimiter.AsyncLimiter(Config.SERPAPI_RPM, 60)
+        self.perplexity_limiter = aiolimiter.AsyncLimiter(Config.PERPLEXITY_RPM, 60)
+
+    async def __aenter__(self):
+        self.http_client = httpx.AsyncClient(timeout=Config.TIMEOUT_SECONDS)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.http_client:
+            await self.http_client.aclose()
+
+    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def serpapi_search(self, query: str, num_results: int = 5) -> ToolResult:
+        """Search using SerpAPI"""
+        if not self.serpapi_api_key:
+            return ToolResult(success=False, error="SerpAPI key not configured", source="serpapi")
+
+        async with self.serpapi_limiter:
+            try:
+                url = "https://serpapi.com/search"
+                params = {
+                    "q": query,
+                    "api_key": self.serpapi_api_key,
+                    "num": num_results,
+                    "engine": "google"
+                }
+
+                response = await self.http_client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+
+                results = []
+                citations = []
+
+                for result in data.get("organic_results", [])[:num_results]:
+                    results.append({
+                        "title": result.get("title", ""),
+                        "url": result.get("link", ""),
+                        "snippet": result.get("snippet", ""),
+                        "position": result.get("position", 0)
+                    })
+                    if result.get("link"):
+                        citations.append(result["link"])
+
+                if "knowledge_graph" in data:
+                    kg = data["knowledge_graph"]
+                    kg_url = kg.get("source", {}).get("link", "")
+                    results.insert(0, {
+                        "title": kg.get("title", ""),
+                        "url": kg_url,
+                        "snippet": kg.get("description", ""),
+                        "type": "knowledge_graph"
+                    })
+                    if kg_url:
+                        citations.insert(0, kg_url)
+
+                return ToolResult(
+                    success=True,
+                    data={"results": results, "query": query},
+                    citations=citations,
+                    source="serpapi"
+                )
+
+            except Exception as e:
+                return ToolResult(success=False, error=f"SerpAPI search failed: {str(e)}", source="serpapi")
+
+    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def google_search(self, query: str, num_results: int = 5) -> ToolResult:
+        """Search using Google Custom Search JSON API"""
+        if not self.google_api_key or not self.google_engine_id:
+            return ToolResult(success=False, error="Google Search API not configured", source="google")
+
+        # Reuse existing limiter to minimize changes
+        async with self.serpapi_limiter:
+            try:
+                url = "https://www.googleapis.com/customsearch/v1"
+                params = {
+                    "key": self.google_api_key,
+                    "cx": self.google_engine_id,
+                    "q": query,
+                    "num": num_results,
+                }
+                response = await self.http_client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+
+                results = []
+                citations = []
+                for item in data.get("items", [])[:num_results]:
+                    results.append({
+                        "title": item.get("title", ""),
+                        "url": item.get("link", ""),
+                        "snippet": item.get("snippet", ""),
+                    })
+                    if item.get("link"):
+                        citations.append(item["link"])
+
+                return ToolResult(
+                    success=True,
+                    data={"results": results, "query": query},
+                    citations=citations,
+                    source="google"
+                )
+
+            except Exception as e:
+                return ToolResult(success=False, error=f"Google search failed: {str(e)}", source="google")
+
+    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def perplexity_search(self, query: str) -> ToolResult:
+        """Search using Perplexity AI - properly configured"""
+        if not self.perplexity_key:
+            return ToolResult(success=False, error="Perplexity API key not configured", source="perplexity")
+
+        async with self.perplexity_limiter:
+            try:
+                url = "https://api.perplexity.ai/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.perplexity_key}",
+                    "Content-Type": "application/json"
+                }
+
+                payload = {
+                    "model": "llama-3.1-sonar-large-128k-online",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Be precise and concise. Provide factual information with sources."
+                        },
+                        {
+                            "role": "user",
+                            "content": query
+                        }
+                    ],
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "return_citations": True,
+                    "search_recency_filter": "month",
+                    "stream": False
+                }
+
+                response = await self.http_client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+
+                answer = data["choices"][0]["message"]["content"]
+                citations = data.get("citations", [])
+
+                results = {
+                    "answer": answer,
+                    "query": query,
+                    "model": data.get("model", ""),
+                    "usage": data.get("usage", {})
+                }
+
+                return ToolResult(
+                    success=True,
+                    data=results,
+                    citations=citations,
+                    source="perplexity"
+                )
+
+            except Exception as e:
+                return ToolResult(success=False, error=f"Perplexity search failed: {str(e)}", source="perplexity")
+
+    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def wiki_fetch(self, query: str, limit: int = 3) -> ToolResult:
+        """Fetch Wikipedia articles"""
+        try:
+            search_results = wikipedia.search(query, results=limit)
+            pages = []
+
+            for title in search_results[:limit]:
+                try:
+                    page = wikipedia.page(title, auto_suggest=False)
+                    pages.append({
+                        "title": page.title,
+                        "url": page.url,
+                        "extract": page.summary[:500] + ("..." if len(page.summary) > 500 else "")
+                    })
+                except wikipedia.exceptions.DisambiguationError as e:
+                    if e.options:
+                        # Try first option but log the ambiguity
+                        try:
+                            page = wikipedia.page(e.options[0], auto_suggest=False)
+                            pages.append({
+                                "title": page.title,
+                                "url": page.url,
+                                "extract": page.summary[:500],
+                                "disambiguation": True,
+                                "options": e.options[:3]
+                            })
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            citations = [p["url"] for p in pages]
+            return ToolResult(success=True, data={"pages": pages, "query": query}, citations=citations,
+                              source="wikipedia")
+
+        except Exception as e:
+            return ToolResult(success=False, error=f"Wikipedia fetch failed: {str(e)}", source="wikipedia")
+
+
+# ============================================================================
+# VECTOR MEMORY SYSTEM
+# ============================================================================
+
+class VectorMemory:
+    """Pinecone-based vector memory"""
+
+    def __init__(self, embedding_service: EmbeddingService, api_key: str = None):
+        self.embedding_service = embedding_service
+        self.api_key = api_key or Config.PINECONE_API_KEY
+        self.index_name = Config.PINECONE_INDEX
+
+        if self.api_key:
+            self.pc = Pinecone(api_key=self.api_key)
+            self._ensure_index()
+            self.index = self.pc.Index(self.index_name)
+        else:
+            self.pc = None
+            self.index = None
+
+    def _ensure_index(self):
+        """Create Pinecone index if it doesn't exist"""
+        try:
+            existing_indexes = self.pc.list_indexes().names()
+
+            if self.index_name not in existing_indexes:
+                self.pc.create_index(
+                    name=self.index_name,
+                    dimension=Config.PINECONE_DIMENSION,
+                    metric="cosine",
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                )
+        except Exception as e:
+            print(f"Pinecone index setup warning: {e}")
+
+    async def query(self, text: str, namespace: str, top_k: int = 5, filter_dict: Dict = None) -> ToolResult:
+        """Query vector memory"""
+        if not self.index:
+            return ToolResult(success=False, error="Pinecone not configured")
+
+        try:
+            embedding = await self.embedding_service.embed(text)
+
+            query_params = {
+                "vector": embedding,
+                "top_k": top_k,
+                "namespace": namespace,
+                "include_metadata": True
+            }
+
+            if filter_dict:
+                query_params["filter"] = filter_dict
+
+            results = self.index.query(**query_params)
+
+            matches = []
+            for match in results.get("matches", []):
+                matches.append({
+                    "id": match.get("id", ""),
+                    "score": match.get("score", 0.0),
+                    "text": match.get("metadata", {}).get("text", ""),
+                    "metadata": match.get("metadata", {}),
+                    "timestamp": match.get("metadata", {}).get("timestamp", "")
+                })
+
+            return ToolResult(success=True, data={"matches": matches, "namespace": namespace})
+
+        except Exception as e:
+            return ToolResult(success=False, error=f"Memory query failed: {str(e)}")
+
+    async def upsert(self, items: List[Dict], namespace: str) -> ToolResult:
+        """Store items in vector memory"""
+        if not self.index:
+            return ToolResult(success=False, error="Pinecone not configured")
+
+        try:
+            vectors = []
+            texts = [item["text"] for item in items]
+            embeddings = await self.embedding_service.embed_batch(texts)
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            for item, embedding in zip(items, embeddings):
+                vector_id = hashlib.md5(f"{item['text']}{timestamp}".encode()).hexdigest()
+                metadata = item.get("meta", {})
+                metadata.update({
+                    "text": item["text"],
+                    "timestamp": timestamp
+                })
+
+                vectors.append({
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": metadata
+                })
+
+            self.index.upsert(vectors=vectors, namespace=namespace)
+            return ToolResult(success=True, data={"stored": len(vectors), "namespace": namespace})
+
+        except Exception as e:
+            return ToolResult(success=False, error=f"Memory upsert failed: {str(e)}")
+
+
+# ============================================================================
+# PROFILE MANAGER WITH PERSISTENCE
+# ============================================================================
+
+class ProfileManager:
+    """Persistent profile storage"""
+
+    def __init__(self, storage_dir: str = None):
+        self.storage_dir = storage_dir or Config.PROFILE_DIR
+        os.makedirs(self.storage_dir, exist_ok=True)
+        self.cache: Dict[str, Dict] = {}
+
+    def _profile_path(self, user_id: str) -> str:
+        safe_id = hashlib.md5(user_id.encode()).hexdigest()
+        return os.path.join(self.storage_dir, f"{safe_id}.json")
+
+    async def read(self, user_id: str, keys: List[str] = None) -> Dict:
+        """Read user profile"""
+        if user_id in self.cache:
+            profile = self.cache[user_id]
+        else:
+            path = self._profile_path(user_id)
+            if os.path.exists(path):
+                try:
+                    async with aiofiles.open(path, 'r') as f:
+                        content = await f.read()
+                        profile = json.loads(content)
+                        self.cache[user_id] = profile
+                except Exception as e:
+                    print(f"Profile read error: {e}")
+                    profile = {}
+            else:
+                profile = {}
+
+        if keys:
+            return {k: profile.get(k) for k in keys if k in profile}
+        return profile
+
+    async def write(self, user_id: str, data: Dict) -> bool:
+        """Write user profile"""
+        try:
+            profile = await self.read(user_id)
+            profile.update(data)
+            self.cache[user_id] = profile
+
+            path = self._profile_path(user_id)
+            async with aiofiles.open(path, 'w') as f:
+                await f.write(json.dumps(profile, indent=2))
+            return True
+        except Exception as e:
+            print(f"Profile write error: {e}")
+            return False
+
+
+# ============================================================================
+# TOOL EXECUTOR WITH VALIDATION
+# ============================================================================
+
+class ToolExecutor:
+    """Enhanced tool executor with validation"""
+
+    def __init__(self):
+        self.embedding_service = EmbeddingService()
+        self.vector_memory = VectorMemory(self.embedding_service)
+        self.profile_manager = ProfileManager()
+        self.search_engine = None
+
+    async def __aenter__(self):
+        self.search_engine = await SearchEngine().__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.search_engine:
+            await self.search_engine.__aexit__(exc_type, exc_val, exc_tb)
+
+    def validate_tool_call(self, tool_name: str, arguments: Dict) -> Tuple[bool, Optional[str]]:
+        """Validate tool call parameters"""
+        try:
+            # Check tool exists
+            if tool_name not in [t.value for t in ToolType]:
+                return False, f"Unknown tool: {tool_name}"
+
+            # Validate required parameters
+            if tool_name in [ToolType.WEB_SEARCH, ToolType.PERPLEXITY_SEARCH, ToolType.GOOGLE_SEARCH]:
+                if "query" not in arguments or not arguments["query"]:
+                    return False, "Missing required parameter: query"
+
+            elif tool_name == ToolType.WIKI_FETCH:
+                if "query" not in arguments:
+                    return False, "Missing required parameter: query"
+
+            elif tool_name == ToolType.MEMORY_QUERY:
+                if "text" not in arguments:
+                    return False, "Missing required parameter: text"
+
+            elif tool_name == ToolType.MEMORY_UPSERT:
+                if "items" not in arguments or not isinstance(arguments["items"], list):
+                    return False, "Missing or invalid parameter: items"
+
+            elif tool_name == ToolType.PROFILE_READ:
+                if "keys" not in arguments or not isinstance(arguments["keys"], list):
+                    return False, "Missing or invalid parameter: keys"
+
+            elif tool_name == ToolType.PROFILE_WRITE:
+                if "data" not in arguments or not isinstance(arguments["data"], dict):
+                    return False, "Missing or invalid parameter: data"
+
+            return True, None
+
+        except Exception as e:
+            return False, str(e)
+
+    async def execute(self, tool_name: str, arguments: Dict, user_id: str = "default") -> ToolResult:
+        """Execute a validated tool call"""
+        # Validate
+        is_valid, error = self.validate_tool_call(tool_name, arguments)
+        if not is_valid:
+            return ToolResult(success=False, error=error)
+
+        try:
+            if tool_name == ToolType.WEB_SEARCH.value:
+                return await self.search_engine.serpapi_search(
+                    arguments.get("query", ""),
+                    arguments.get("num", 5)
+                )
+
+            elif tool_name == ToolType.PERPLEXITY_SEARCH.value:
+                return await self.search_engine.perplexity_search(arguments.get("query", ""))
+
+            elif tool_name == ToolType.GOOGLE_SEARCH.value:
+                return await self.search_engine.google_search(
+                    arguments.get("query", ""),
+                    arguments.get("num", 5)
+                )
+
+            elif tool_name == ToolType.WIKI_FETCH.value:
+                return await self.search_engine.wiki_fetch(
+                    arguments.get("query", ""),
+                    arguments.get("limit", 3)
+                )
+
+            elif tool_name == ToolType.MEMORY_QUERY.value:
+                namespace = f"user:{user_id}"
+                return await self.vector_memory.query(
+                    arguments.get("text", ""),
+                    namespace,
+                    arguments.get("top_k", 5),
+                    arguments.get("filter")
+                )
+
+            elif tool_name == ToolType.MEMORY_UPSERT.value:
+                namespace = f"user:{user_id}"
+                return await self.vector_memory.upsert(arguments.get("items", []), namespace)
+
+            elif tool_name == ToolType.PROFILE_READ.value:
+                data = await self.profile_manager.read(user_id, arguments.get("keys"))
+                return ToolResult(success=True, data=data)
+
+            elif tool_name == ToolType.PROFILE_WRITE.value:
+                success = await self.profile_manager.write(user_id, arguments.get("data", {}))
+                return ToolResult(success=success, data={"updated": list(arguments.get("data", {}).keys())})
+
+            else:
+                return ToolResult(success=False, error=f"Tool not implemented: {tool_name}")
+
+        except Exception as e:
+            return ToolResult(success=False, error=f"Tool execution failed: {str(e)}")
+
+
+# ============================================================================
+# MAIN AGENT - FIXED WITH FUNCTION CALLING
+# ============================================================================
+
+class AutonomousAgent:
+    """Fixed agent using OpenAI function calling"""
+
+    def __init__(self, openai_api_key: str = None):
+        self.openai_api_key = openai_api_key or Config.OPENAI_API_KEY
+        self.client = AsyncOpenAI(api_key=self.openai_api_key) if self.openai_api_key else None
+        self.tool_executor = None
+        self.conversation_history: List[Dict] = []
+        self.citation_manager = CitationManager()
+        self.max_iterations = 10
+        self.rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
+
+    async def __aenter__(self):
+        self.tool_executor = await ToolExecutor().__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.tool_executor:
+            await self.tool_executor.__aexit__(exc_type, exc_val, exc_tb)
+
+    def _get_function_definitions(self) -> List[Dict]:
+        """Define available functions for OpenAI"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web using SerpAPI for current information, news, facts, and general queries",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query"
+                            },
+                            "num": {
+                                "type": "integer",
+                                "description": "Number of results (default 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "google_search",
+                    "description": "Search the web using Google Custom Search (requires GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query"
+                            },
+                            "num": {
+                                "type": "integer",
+                                "description": "Number of results (default 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "perplexity_search",
+                    "description": "Use Perplexity AI for complex questions requiring synthesized knowledge, analysis, or deep research",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The complex question or research query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "wiki_fetch",
+                    "description": "Fetch encyclopedic information from Wikipedia",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The Wikipedia search query"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Number of articles to fetch (default 3)",
+                                "default": 3
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_query",
+                    "description": "Search user's stored memories, preferences, and past conversations",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "What to search for in memory"
+                            },
+                            "top_k": {
+                                "type": "integer",
+                                "description": "Number of memories to retrieve (default 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["text"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_upsert",
+                    "description": "Store important facts, preferences, or information about the user",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "items": {
+                                "type": "array",
+                                "description": "List of items to store",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {"type": "string"},
+                                        "meta": {"type": "object"}
+                                    },
+                                    "required": ["text"]
+                                }
+                            }
+                        },
+                        "required": ["items"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "profile_read",
+                    "description": "Read user profile data",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "keys": {
+                                "type": "array",
+                                "description": "Profile keys to read",
+                                "items": {"type": "string"}
+                            }
+                        },
+                        "required": ["keys"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "profile_write",
+                    "description": "Update user profile data",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "data": {
+                                "type": "object",
+                                "description": "Profile data to update"
+                            }
+                        },
+                        "required": ["data"]
+                    }
+                }
+            }
+        ]
+
+    def _should_query_memory(self, user_message: str) -> bool:
+        """Determine if memory query is needed"""
+        memory_indicators = [
+            "remember", "recall", "told you", "mentioned", "previous",
+            "last time", "before", "my preference", "i like", "i prefer"
+        ]
+        return any(indicator in user_message.lower() for indicator in memory_indicators)
+
+    def _manage_conversation_history(self):
+        """Keep conversation history manageable"""
+        if len(self.conversation_history) > Config.MAX_CONVERSATION_HISTORY:
+            # Keep system message + recent messages
+            system_msg = [msg for msg in self.conversation_history if msg["role"] == "system"]
+            recent = self.conversation_history[-Config.MAX_CONVERSATION_HISTORY:]
+            self.conversation_history = system_msg + recent
+
+    async def chat(self, user_message: str, user_id: str = "default") -> str:
+        """Main chat interface with function calling"""
+        if not self.client:
+            return "❌ OpenAI API not configured"
+
+        self.citation_manager.clear()
+
+        # Build system message
+        system_message = {
+            "role": "system",
+            "content": """You are an autonomous personal assistant with advanced capabilities.
+
+When answering questions:
+1. Use the appropriate tools for the query type:
+   - web_search: Current events, news, general facts
+   - perplexity_search: Complex analysis, synthesis, research questions
+   - wiki_fetch: Encyclopedic knowledge
+   - memory_query: User preferences, past conversations (only when relevant)
+
+2. Always cite sources using [1], [2] format when using tool results
+3. Combine multiple sources for comprehensive answers
+4. Be conversational but accurate
+5. Store important user preferences using memory_upsert
+
+Choose tools intelligently - not every query needs tools."""
+        }
+
+        # Initialize conversation if needed
+        if not self.conversation_history or self.conversation_history[0]["role"] != "system":
+            self.conversation_history = [system_message]
+
+        # Add user message
+        self.conversation_history.append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # Optional: Query memory if relevant
+        memory_context = ""
+        if self._should_query_memory(user_message):
+            memory_result = await self.tool_executor.execute(
+                "memory_query",
+                {"text": user_message, "top_k": 3},
+                user_id
+            )
+            if memory_result.success and memory_result.data.get("matches"):
+                relevant = [m for m in memory_result.data["matches"] if m.get("score", 0) > 0.7]
+                if relevant:
+                    memory_context = "\n\n[Context from memory]: " + "; ".join([m["text"] for m in relevant[:2]])
+
+        if memory_context:
+            self.conversation_history.append({
+                "role": "system",
+                "content": memory_context
+            })
+
+        iterations = 0
+
+        while iterations < self.max_iterations:
+            iterations += 1
+
+            async with self.rate_limiter:
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=Config.CHAT_MODEL,
+                        messages=self.conversation_history,
+                        tools=self._get_function_definitions(),
+                        tool_choice="auto",
+                        temperature=0.3,
+                        max_tokens=2500
+                    )
+
+                    assistant_message = response.choices[0].message
+
+                    # Check if assistant wants to call tools
+                    if assistant_message.tool_calls:
+                        # Add assistant message with tool calls
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "content": assistant_message.content,
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments
+                                    }
+                                }
+                                for tc in assistant_message.tool_calls
+                            ]
+                        })
+
+                        # Execute each tool call
+                        for tool_call in assistant_message.tool_calls:
+                            function_name = tool_call.function.name
+                            try:
+                                function_args = json.loads(tool_call.function.arguments)
+                            except json.JSONDecodeError:
+                                function_args = {}
+
+                            # Execute tool
+                            result = await self.tool_executor.execute(function_name, function_args, user_id)
+
+                            # Track citations
+                            if result.citations:
+                                self.citation_manager.add_citations(result.citations)
+
+                            # Format tool response
+                            if result.success:
+                                # Truncate large responses properly
+                                data_str = json.dumps(result.data, indent=2)
+                                if len(data_str) > 2000:
+                                    data_str = data_str[:2000] + "\n... (truncated)"
+
+                                tool_response = f"Success from {result.source or function_name}:\n{data_str}"
+                            else:
+                                tool_response = f"Error: {result.error}"
+
+                            # Add tool response to conversation
+                            self.conversation_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": function_name,
+                                "content": tool_response
+                            })
+
+                        # Continue loop to get final answer
+                        continue
+
+                    else:
+                        # Final answer received
+                        final_answer = assistant_message.content or "I apologize, I couldn't generate a response."
+
+                        # Add citations
+                        final_answer += self.citation_manager.format_citations()
+
+                        # Store conversation
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "content": final_answer
+                        })
+
+                        # Manage history size
+                        self._manage_conversation_history()
+
+                        return final_answer
+
+                except Exception as e:
+                    return f"❌ Error during execution: {str(e)}"
+
+        return "⚠️ Maximum iterations reached. Please try rephrasing your question."
+
+    def clear_history(self):
+        """Clear conversation history"""
+        self.conversation_history.clear()
+
+
+# ============================================================================
+# MAIN INTERFACE
+# ============================================================================
+
+class AutonomousAssistant:
+    """Main assistant interface"""
+
+    def __init__(self):
+        self.agent = None
+
+    async def __aenter__(self):
+        self.agent = await AutonomousAgent().__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.agent:
+            await self.agent.__aexit__(exc_type, exc_val, exc_tb)
+
+    async def chat(self, message: str, user_id: str = "default") -> str:
+        """Process user message"""
+        return await self.agent.chat(message, user_id)
+
+    def clear_history(self):
+        """Clear conversation history"""
+        if self.agent:
+            self.agent.clear_history()
+
+
+# ============================================================================
+# CLI INTERFACE
+# ============================================================================
+
+async def main():
+    """Enhanced CLI"""
+    print("🧠 Autonomous Personal Assistant v2.1 (Fixed)")
+    print("=" * 60)
+    print("✅ Function Calling | Rate Limiting | Persistence | Validation")
+    print("=" * 60)
+    print("\nCommands:")
+    print("  exit     - Quit")
+    print("  clear    - Clear conversation history")
+    print("  config   - Show API status")
+    print()
+
+    user_id = "cli_user"
+
+    async with AutonomousAssistant() as assistant:
+        try:
+            while True:
+                try:
+                    user_input = input("\n🧑 You: ").strip()
+
+                    if not user_input:
+                        continue
+
+                    if user_input.lower() == 'exit':
+                        print("👋 Goodbye!")
+                        break
+
+                    if user_input.lower() == 'clear':
+                        assistant.clear_history()
+                        print("✅ Conversation history cleared")
+                        continue
+
+                    if user_input.lower() == 'config':
+                        print("\n📋 API Status:")
+                        print(f"  OpenAI: {'✅' if Config.OPENAI_API_KEY else '❌'}")
+                        print(f"  Pinecone: {'✅' if Config.PINECONE_API_KEY else '❌'}")
+                        print(f"  SerpAPI: {'✅' if Config.SERPAPI_API_KEY else '❌'}")
+                        print(f"  Perplexity: {'✅' if Config.PERPLEXITY_API_KEY else '❌'}")
+                        continue
+
+                    print("\n🤔 Processing...\n")
+                    response = await assistant.chat(user_input, user_id)
+                    print(f"🤖 Assistant:\n\n{response}")
+
+                except KeyboardInterrupt:
+                    print("\n\n👋 Goodbye!")
+                    break
+                except Exception as e:
+                    print(f"\n❌ Error: {str(e)}")
+
+        except Exception as e:
+            print(f"Fatal error: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
