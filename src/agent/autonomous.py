@@ -4,6 +4,7 @@ Main agent with conversation management and memory
 """
 
 import json
+import asyncio
 import aiolimiter
 from typing import List, Dict, Optional
 from openai import AsyncOpenAI
@@ -32,12 +33,24 @@ class AutonomousAgent:
         self.citation_manager = CitationManager()
         self.max_iterations = 10
         self._rate_limiter = None
+        self._rate_limiter_loop = None
 
     @property
     def rate_limiter(self):
-        """Lazy-load rate limiter"""
-        if self._rate_limiter is None:
+        """Get or create rate limiter for current event loop"""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, create new limiter
             self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
+            self._rate_limiter_loop = None
+            return self._rate_limiter
+        
+        # Check if we're in a different loop
+        if self._rate_limiter_loop is not current_loop:
+            self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
+            self._rate_limiter_loop = current_loop
+        
         return self._rate_limiter
 
     async def __aenter__(self):
