@@ -5,10 +5,12 @@ Perplexity AI search implementation
 import aiolimiter
 from tenacity import retry, stop_after_attempt, wait_exponential
 import asyncio
+import time
 from src.services.search.base import BaseSearchEngine
 from src.core.models import ToolResult
 from src.config.settings import Config
 from src.services.cost_tracker import CostTracker
+from src.core.metrics import get_metrics
 
 
 class PerplexitySearch(BaseSearchEngine):
@@ -44,10 +46,14 @@ class PerplexitySearch(BaseSearchEngine):
     )
     async def search(self, query: str, user_id: str = "default") -> ToolResult:
         """Search using Perplexity AI"""
+        metrics = get_metrics()
+        metrics.record_tool_usage("perplexity")
+        _t0 = time.perf_counter()
         if not self.api_key:
+            metrics.record_response_time("perplexity", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error="Perplexity API key not configured",
+                error="perplexity failed: ConfigError - API key not configured",
                 source="perplexity"
             )
 
@@ -55,6 +61,7 @@ class PerplexitySearch(BaseSearchEngine):
         if self.cost_tracker and not await self.cost_tracker.check_budget(
                 user_id, "perplexity"
         ):
+            metrics.record_response_time("perplexity", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
                 error="Daily budget limit exceeded",
@@ -104,6 +111,7 @@ class PerplexitySearch(BaseSearchEngine):
                 if self.cost_tracker:
                     await self.cost_tracker.record_cost(user_id, "perplexity")
 
+                metrics.record_response_time("perplexity", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=True,
                     data=results,
@@ -113,8 +121,9 @@ class PerplexitySearch(BaseSearchEngine):
                 )
 
             except Exception as e:
+                metrics.record_response_time("perplexity", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=False,
-                    error=f"Perplexity search failed: {str(e)}",
+                    error=f"perplexity failed: {e.__class__.__name__} - {str(e)}",
                     source="perplexity"
                 )

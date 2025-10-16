@@ -63,6 +63,9 @@ class Config:
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+    # Metrics
+    METRICS_ENABLED = os.getenv("METRICS_ENABLED", "True").lower() == "true"
+
     @classmethod
     def ensure_directories(cls):
         """Create required directories if they don't exist"""
@@ -149,3 +152,4 @@ except Exception as e:
 if not Config.validate_critical_keys(warn=False):
     print("\n⚠️  Configuration Warning: OPENAI_API_KEY not found in environment", file=sys.stderr)
     print("Please set it in your .env file or environment variables\n", file=sys.stderr)
+

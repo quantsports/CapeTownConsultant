@@ -271,33 +271,34 @@ if selected_view == "💬 Chat":
             if st.session_state.streaming_enabled and st.session_state.assistant:
                 # Phase 2: Streaming response
                 response_placeholder = st.empty()
-                full_response = ""
+                chunks = []
 
                 try:
                     async def stream_response():
-                        nonlocal full_response
                         async for chunk in st.session_state.assistant.chat_stream(
                                 prompt,
                                 user_id=st.session_state.user_id
                         ):
-                            full_response += chunk
+                            chunks.append(chunk)
+                            full = "".join(chunks)
 
                             # Update display with streaming content
                             if st.session_state.show_progress:
                                 # Show progress indicators
                                 response_placeholder.markdown(
-                                    f'<div class="streaming">{full_response}</div>',
+                                    f'<div class="streaming">{full}</div>',
                                     unsafe_allow_html=True
                                 )
                             else:
                                 # Show only final content parts
                                 if not chunk.startswith(('🤔', '🔧', '✅')):
-                                    response_placeholder.markdown(full_response)
+                                    response_placeholder.markdown(full)
 
 
                     asyncio.run(stream_response())
 
                     # Final display without animation
+                    full_response = "".join(chunks)
                     response_placeholder.markdown(full_response)
                     st.session_state.messages.append({
                         "role": "assistant",

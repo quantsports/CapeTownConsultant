@@ -5,10 +5,12 @@ SerpAPI search implementation
 import aiolimiter
 from tenacity import retry, stop_after_attempt, wait_exponential
 import asyncio
+import time
 from src.services.search.base import BaseSearchEngine
 from src.core.models import ToolResult
 from src.config.settings import Config
 from src.services.cost_tracker import CostTracker
+from src.core.metrics import get_metrics
 
 
 class SerpAPISearch(BaseSearchEngine):
@@ -49,18 +51,23 @@ class SerpAPISearch(BaseSearchEngine):
             num_results: int = 5
     ) -> ToolResult:
         """Search using SerpAPI"""
+        metrics = get_metrics()
+        metrics.record_tool_usage("serpapi")
+        _t0 = time.perf_counter()
         if not self.api_key:
+            metrics.record_response_time("serpapi", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error="SerpAPI key not configured",
+                error="serpapi failed: ConfigError - API key not configured",
                 source="serpapi"
             )
 
         # Check budget
         if self.cost_tracker and not await self.cost_tracker.check_budget(user_id, "serpapi"):
+            metrics.record_response_time("serpapi", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error="Daily budget limit exceeded",
+                error="serpapi failed: BudgetError - Daily budget limit exceeded",
                 source="serpapi"
             )
 
@@ -109,6 +116,7 @@ class SerpAPISearch(BaseSearchEngine):
                 if self.cost_tracker:
                     await self.cost_tracker.record_cost(user_id, "serpapi")
 
+                metrics.record_response_time("serpapi", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=True,
                     data={"results": results, "query": query},
@@ -118,8 +126,9 @@ class SerpAPISearch(BaseSearchEngine):
                 )
 
             except Exception as e:
+                metrics.record_response_time("serpapi", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=False,
-                    error=f"SerpAPI search failed: {str(e)}",
+                    error=f"serpapi failed: {e.__class__.__name__} - {str(e)}",
                     source="serpapi"
                 )

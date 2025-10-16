@@ -60,7 +60,7 @@ class VectorMemory:
     ) -> ToolResult:
         """Query vector memory"""
         if not self.index:
-            return ToolResult(success=False, error="Pinecone not configured")
+            return ToolResult(success=False, error="vector failed: ConfigError - Pinecone not configured", source="vector")
 
         try:
             # Generate embedding for query
@@ -100,7 +100,7 @@ class VectorMemory:
 
         except Exception as e:
             logger.error("memory_query_failed", error=str(e), user_id=user_id)
-            return ToolResult(success=False, error=f"Memory query failed: {str(e)}")
+            return ToolResult(success=False, error=f"vector failed: {e.__class__.__name__} - {str(e)}", source="vector")
 
     async def upsert(
             self,
@@ -110,7 +110,7 @@ class VectorMemory:
     ) -> ToolResult:
         """Store items in vector memory"""
         if not self.index:
-            return ToolResult(success=False, error="Pinecone not configured")
+            return ToolResult(success=False, error="vector failed: ConfigError - Pinecone not configured", source="vector")
 
         try:
             vectors = []
@@ -154,4 +154,4 @@ class VectorMemory:
 
         except Exception as e:
             logger.error("memory_upsert_failed", error=str(e), user_id=user_id)
-            return ToolResult(success=False, error=f"Memory upsert failed: {str(e)}")
+            return ToolResult(success=False, error=f"vector failed: {e.__class__.__name__} - {str(e)}", source="vector")

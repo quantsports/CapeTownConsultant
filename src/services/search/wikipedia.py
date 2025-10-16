@@ -3,10 +3,12 @@ Wikipedia search implementation
 """
 
 import asyncio
+import time
 from typing import List, Optional, Dict
 
 from src.services.search.base import BaseSearchEngine
 from src.core.models import ToolResult
+from src.core.metrics import get_metrics
 
 
 class WikipediaSearch(BaseSearchEngine):
@@ -71,12 +73,16 @@ class WikipediaSearch(BaseSearchEngine):
         limit: int = 3
     ) -> ToolResult:
         """Search Wikipedia and return results"""
+        metrics = get_metrics()
+        metrics.record_tool_usage("wikipedia")
+        _t0 = time.perf_counter()
         try:
             titles = await self.search_titles(query, limit)
             if not titles:
+                metrics.record_response_time("wikipedia", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=False,
-                    error="No Wikipedia results found",
+                    error="wikipedia failed: NotFoundError - No results found",
                     source="wikipedia"
                 )
 
@@ -87,6 +93,7 @@ class WikipediaSearch(BaseSearchEngine):
 
             citations = [p["url"] for p in valid_pages]
 
+            metrics.record_response_time("wikipedia", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=True,
                 data={"pages": valid_pages, "query": query},
@@ -96,8 +103,9 @@ class WikipediaSearch(BaseSearchEngine):
             )
 
         except Exception as e:
+            metrics.record_response_time("wikipedia", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error=f"Wikipedia fetch failed: {str(e)}",
+                error=f"wikipedia failed: {e.__class__.__name__} - {str(e)}",
                 source="wikipedia"
             )

@@ -333,7 +333,7 @@ class TestEdgeCases:
         executor = ToolExecutor()
 
         special_texts = [
-            "User's favorite: "Il Ristorante"",
+            "User's favorite: sushi 🍣",
             "Budget: $50-$100 per meal 💰",
             "Prefers 3-course meals\nwith wine pairing",
             "Dislikes: spicy 🌶️, salty 🧂, bitter"

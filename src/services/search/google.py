@@ -5,11 +5,13 @@ Google Custom Search implementation
 import asyncio
 import aiolimiter
 from tenacity import retry, stop_after_attempt, wait_exponential
+import time
 
 from src.services.search.base import BaseSearchEngine
 from src.core.models import ToolResult
 from src.config.settings import Config
 from src.services.cost_tracker import CostTracker
+from src.core.metrics import get_metrics
 
 
 class GoogleSearch(BaseSearchEngine):
@@ -53,10 +55,14 @@ class GoogleSearch(BaseSearchEngine):
             num_results: int = 5
     ) -> ToolResult:
         """Search using Google Custom Search"""
+        metrics = get_metrics()
+        metrics.record_tool_usage("google")
+        _t0 = time.perf_counter()
         if not self.api_key or not self.engine_id:
+            metrics.record_response_time("google", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error="Google Search API not configured. Set GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID in .env",
+                error="google failed: ConfigError - API key/engine not configured",
                 source="google"
             )
 
@@ -64,9 +70,10 @@ class GoogleSearch(BaseSearchEngine):
         if self.cost_tracker and not await self.cost_tracker.check_budget(
                 user_id, "google-search"
         ):
+            metrics.record_response_time("google", (time.perf_counter() - _t0) * 1000.0)
             return ToolResult(
                 success=False,
-                error="Daily budget limit exceeded",
+                error="google failed: BudgetError - Daily budget limit exceeded",
                 source="google"
             )
 
@@ -100,6 +107,7 @@ class GoogleSearch(BaseSearchEngine):
                 if self.cost_tracker:
                     await self.cost_tracker.record_cost(user_id, "google-search")
 
+                metrics.record_response_time("google", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=True,
                     data={"results": results, "query": query},
@@ -109,8 +117,9 @@ class GoogleSearch(BaseSearchEngine):
                 )
 
             except Exception as e:
+                metrics.record_response_time("google", (time.perf_counter() - _t0) * 1000.0)
                 return ToolResult(
                     success=False,
-                    error=f"Google search failed: {str(e)}",
+                    error=f"google failed: {e.__class__.__name__} - {str(e)}",
                     source="google"
                 )

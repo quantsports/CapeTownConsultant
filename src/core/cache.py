@@ -12,6 +12,7 @@ from datetime import datetime
 import aiofiles
 
 from src.config.settings import Config
+from src.core.metrics import get_metrics
 
 
 class LRUCache:
@@ -60,10 +61,15 @@ class PersistentEmbeddingCache:
     async def get(self, text: str) -> Optional[List[float]]:
         """Get embedding from cache"""
         key = self._cache_key(text)
+        metrics = get_metrics()
 
         # Check memory cache first
-        if cached := self.memory_cache.get(key):
+        cached = self.memory_cache.get(key)
+        if cached is not None:
+            metrics.record_cache_access("embeddings.memory", True)
             return cached
+        else:
+            metrics.record_cache_access("embeddings.memory", False)
 
         # Check disk cache
         cache_file = self._cache_file(key)
@@ -73,9 +79,12 @@ class PersistentEmbeddingCache:
                     data = json.loads(await f.read())
                     embedding = data["embedding"]
                     self.memory_cache.set(key, embedding)
+                    metrics.record_cache_access("embeddings.disk", True)
                     return embedding
             except Exception:
-                pass
+                metrics.record_cache_access("embeddings.disk", False)
+        else:
+            metrics.record_cache_access("embeddings.disk", False)
 
         return None
 
