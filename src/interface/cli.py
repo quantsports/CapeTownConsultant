@@ -1,92 +1,127 @@
 """
-CLI interface
-Command-line interface for the assistant with orchestration support
+CLI interface with full orchestration support
+Fixed to properly control and display orchestration status
 """
 
 import asyncio
 from src.interface.assistant import AutonomousAssistant
 from src.config.settings import Config
+from src.workers.templates import WorkerType, WorkerTemplates
 
 
 async def run_cli():
-    """Run the CLI interface"""
+    """Run the CLI interface with orchestration support"""
     print("🧠 Autonomous Assistant v3.1 (Multi-Agent Orchestration)")
     print("=" * 70)
     print("✅ Features: Multi-agent orchestration, Domain specialists")
     print("=" * 70)
-    print("\nCommands: exit | clear | config | costs | mode | workers\n")
+    print("\nCommands:")
+    print("  exit      - Exit the program")
+    print("  clear     - Clear conversation history")
+    print("  config    - Show configuration")
+    print("  costs     - Show cost summary")
+    print("  mode      - Toggle orchestration mode")
+    print("  workers   - List available workers")
+    print("  status    - Show current mode and status")
+    print()
 
     user_id = "cli_user"
-    orchestration_enabled = True
+    orchestration_enabled = True  # Start with orchestration enabled
 
     async with AutonomousAssistant(enable_orchestration=orchestration_enabled) as assistant:
         try:
             while True:
                 try:
-                    mode_indicator = "🎭" if orchestration_enabled else "🤖"
-                    user_input = input(f"\n{mode_indicator} You: ").strip()
+                    # Dynamic mode indicator
+                    mode_status = assistant.get_orchestration_status()
+                    mode_indicator = "🎭" if mode_status else "🤖"
+                    mode_text = "ORCHESTRATION" if mode_status else "TRADITIONAL"
+
+                    user_input = input(f"\n{mode_indicator} [{mode_text}] You: ").strip()
 
                     if not user_input:
                         continue
 
+                    # Handle commands
                     if user_input.lower() == 'exit':
                         costs = await assistant.get_costs(user_id)
-                        print(f"\n💰 Final: ${costs['total']:.4f}")
+                        print(f"\n💰 Final costs: ${costs['total']:.4f}")
                         print("👋 Goodbye!")
                         break
 
-                    if user_input.lower() == 'clear':
+                    elif user_input.lower() == 'clear':
                         assistant.clear_history()
-                        print("✅ History cleared")
+                        print("✅ Conversation history cleared")
                         continue
 
-                    if user_input.lower() == 'costs':
+                    elif user_input.lower() == 'config':
+                        print("\n📋 Configuration:")
+                        print(f"  OpenAI API: {'✅ Configured' if Config.OPENAI_API_KEY else '❌ Missing'}")
+                        print(f"  Pinecone: {'✅ Configured' if Config.PINECONE_API_KEY else '⚠️  Optional'}")
+                        print(f"  SerpAPI: {'✅ Configured' if Config.SERPAPI_API_KEY else '⚠️  Optional'}")
+                        print(f"  Model: {Config.CHAT_MODEL}")
+                        print(f"  Max Iterations: {Config.MAX_ITERATIONS}")
+                        print(f"  Orchestration: {'✅ Enabled' if assistant.get_orchestration_status() else '❌ Disabled'}")
+                        continue
+
+                    elif user_input.lower() == 'costs':
                         costs = await assistant.get_costs(user_id)
-                        print(f"\n💰 Today: ${costs['total']:.4f} / ${costs['limit']:.2f}")
+                        print(f"\n💰 Cost Summary:")
+                        print(f"  Total: ${costs['total']:.4f}")
+                        print(f"  Limit: ${costs['limit']:.2f}")
+                        print(f"  Remaining: ${costs['limit'] - costs['total']:.2f}")
                         continue
 
-                    if user_input.lower() == 'config':
-                        print("\n📋 Status:")
-                        status = Config.validate_required_keys()
-                        print(f"  OpenAI: {'✅' if status['openai'] else '❌'}")
-                        print(f"  Pinecone: {'✅' if status['pinecone'] else '❌'}")
-                        print(f"  SerpAPI: {'✅' if status['serpapi'] else '❌'}")
-                        print(f"  Google: {'✅' if status['google_search'] else '❌'}")
-                        print(f"  Perplexity: {'✅' if status['perplexity'] else '❌'}")
+                    elif user_input.lower() == 'mode':
+                        current = assistant.get_orchestration_status()
+                        assistant.toggle_orchestration(not current)
+                        new_mode = "ORCHESTRATION" if not current else "TRADITIONAL"
+                        print(f"✅ Switched to {new_mode} mode")
                         continue
 
-                    if user_input.lower() == 'mode':
-                        orchestration_enabled = not orchestration_enabled
-                        assistant.toggle_orchestration(orchestration_enabled)
-                        mode_name = "ORCHESTRATION" if orchestration_enabled else "TRADITIONAL"
-                        print(f"✅ Switched to {mode_name} mode")
+                    elif user_input.lower() == 'workers':
+                        print("\n👥 Available Workers:")
+                        print()
+                        for worker_type in WorkerType:
+                            template = WorkerTemplates.get_template(worker_type)
+                            name = worker_type.value.replace('_', ' ').title()
+                            priority = template.get('priority', 3)
+                            tools = template.get('tools', [])
+                            print(f"  {name}")
+                            print(f"    Priority: {priority} | Tools: {', '.join(tools)}")
+                        print()
                         continue
 
-                    if user_input.lower() == 'workers':
-                        from src.workers.templates import WorkerType, WorkerTemplates
-                        print("\n👥 Available Specialists:")
-                        for wt in WorkerType:
-                            template = WorkerTemplates.get_template(wt)
-                            if template:
-                                print(f"  • {wt.value.replace('_', ' ').title()} (Priority: {template.get('priority', 3)})")
+                    elif user_input.lower() == 'status':
+                        mode = "ORCHESTRATION" if assistant.get_orchestration_status() else "TRADITIONAL"
+                        costs = await assistant.get_costs(user_id)
+                        print(f"\n📊 Current Status:")
+                        print(f"  Mode: {mode}")
+                        print(f"  User ID: {user_id}")
+                        print(f"  Costs: ${costs['total']:.4f} / ${costs['limit']:.2f}")
+                        print(f"  Model: {Config.CHAT_MODEL}")
                         continue
 
-                    print("\n🤔 Processing...\n")
+                    # Process normal chat message
+                    print()  # Add spacing
                     response = await assistant.chat(user_input, user_id)
-                    print(f"🤖 Assistant:\n\n{response}")
+                    print(f"\n{response}")
 
                 except KeyboardInterrupt:
-                    print("\n👋 Goodbye!")
-                    break
+                    print("\n⚠️  Interrupted. Type 'exit' to quit.")
+                    continue
+
                 except Exception as e:
-                    print(f"❌ Error: {e}")
+                    print(f"\n❌ Error: {str(e)}")
+                    continue
 
         except Exception as e:
-            print(f"Fatal: {e}")
+            print(f"\n💥 Fatal error: {str(e)}")
+            raise
 
 
 def main():
-    """Entry point for CLI"""
+    """Entry point"""
     asyncio.run(run_cli())
 
 

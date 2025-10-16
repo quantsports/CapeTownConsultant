@@ -255,6 +255,7 @@ Synthesize insights from multiple perspectives and provide holistic, strategic g
         # Cost-related
         "cost": [WorkerType.COST_ANALYST],
         "price": [WorkerType.COST_ANALYST, WorkerType.FINANCIAL_ADVISOR],
+        "pricing": [WorkerType.COST_ANALYST, WorkerType.FINANCIAL_ADVISOR],
         "profit": [WorkerType.COST_ANALYST, WorkerType.FINANCIAL_ADVISOR],
         "margin": [WorkerType.COST_ANALYST],
         "food cost": [WorkerType.COST_ANALYST],

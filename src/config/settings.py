@@ -37,6 +37,7 @@ class Config:
     TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "30"))
     MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "20"))
     CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
+    MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
 
     # Rate Limiting (requests per minute)
     OPENAI_RPM = int(os.getenv("OPENAI_RPM", "50"))
@@ -152,4 +153,6 @@ except Exception as e:
 if not Config.validate_critical_keys(warn=False):
     print("\n⚠️  Configuration Warning: OPENAI_API_KEY not found in environment", file=sys.stderr)
     print("Please set it in your .env file or environment variables\n", file=sys.stderr)
+
+
 

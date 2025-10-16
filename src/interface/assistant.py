@@ -1,8 +1,6 @@
 """
-Assistant interface with Phase 2 enhancements
-- Streaming support
-- Progress callbacks
-- Smart caching integration
+Assistant interface with orchestration support
+Fixed to properly integrate multi-agent orchestration
 """
 import asyncio
 import re
@@ -13,21 +11,32 @@ from src.services.cost_tracker import CostTracker
 
 
 class AutonomousAssistant:
-    """Enhanced assistant interface with streaming and caching"""
+    """Enhanced assistant interface with orchestration support"""
 
     def __init__(
         self,
         cost_tracker: Optional[CostTracker] = None,
-        enable_streaming: bool = False
+        enable_streaming: bool = False,
+        enable_orchestration: bool = True
     ):
+        """
+        Initialize assistant
+
+        Args:
+            cost_tracker: Cost tracking instance
+            enable_streaming: Enable streaming responses
+            enable_orchestration: Enable multi-agent orchestration (default: True)
+        """
         self.cost_tracker = cost_tracker or CostTracker()
         self.agent: Optional[AutonomousAgent] = None
         self.enable_streaming = enable_streaming
+        self.enable_orchestration = enable_orchestration
 
     async def __aenter__(self):
-        """Initialize agent"""
+        """Initialize agent with orchestration support"""
         self.agent = await AutonomousAgent(
-            cost_tracker=self.cost_tracker
+            cost_tracker=self.cost_tracker,
+            enable_orchestration=self.enable_orchestration
         ).__aenter__()
         return self
 
@@ -39,8 +48,7 @@ class AutonomousAssistant:
     async def chat(self, message: str, user_id: str = "default") -> str:
         """
         Send a message and get complete response
-
-        Uses concurrent tool execution for faster responses
+        Uses orchestration for complex queries, traditional mode for simple ones
         """
         if not self.agent:
             raise RuntimeError("Assistant not initialized. Use 'async with' context manager.")
@@ -56,10 +64,6 @@ class AutonomousAssistant:
 
         Yields:
             Progress updates and response chunks
-
-        Example:
-            async for chunk in assistant.chat_stream("Hello"):
-                print(chunk, end='', flush=True)
         """
         if not self.agent:
             raise RuntimeError("Assistant not initialized. Use 'async with' context manager.")
@@ -70,12 +74,28 @@ class AutonomousAssistant:
     def set_progress_callback(self, callback):
         """
         Set callback for progress updates
-
         Callback will receive progress messages during execution
-        Useful for UI progress bars
         """
         if self.agent:
             self.agent.set_progress_callback(callback)
+
+    def toggle_orchestration(self, enabled: bool):
+        """
+        Toggle orchestration mode at runtime
+
+        Args:
+            enabled: True to enable orchestration, False for traditional mode
+        """
+        if self.agent:
+            self.agent.enable_orchestration = enabled
+            status = "enabled" if enabled else "disabled"
+            print(f"🎭 Orchestration {status}")
+        else:
+            raise RuntimeError("Assistant not initialized")
+
+    def get_orchestration_status(self) -> bool:
+        """Check if orchestration is currently enabled"""
+        return self.agent.enable_orchestration if self.agent else self.enable_orchestration
 
     def clear_history(self):
         """Clear conversation history"""

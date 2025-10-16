@@ -1,5 +1,5 @@
 """
-Worker Orchestrator
+Worker Orchestrator - Complete Implementation
 Coordinates multiple specialized workers and synthesizes their results
 """
 
@@ -7,7 +7,7 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from openai import AsyncOpenAI
-import re
+
 from src.config.settings import Config
 from src.core.logging import logger
 from src.workers.worker import BaseWorker, WorkerResult
@@ -24,10 +24,10 @@ class WorkerOrchestrator:
     """
 
     def __init__(
-            self,
-            tool_executor: ToolExecutor,
-            profile_manager: ProfileManager,
-            openai_api_key: Optional[str] = None
+        self,
+        tool_executor: ToolExecutor,
+        profile_manager: ProfileManager,
+        openai_api_key: Optional[str] = None
     ):
         self.tool_executor = tool_executor
         self.profile_manager = profile_manager
@@ -35,11 +35,11 @@ class WorkerOrchestrator:
         self.client = AsyncOpenAI(api_key=self.openai_api_key) if self.openai_api_key else None
 
     async def orchestrate(
-            self,
-            query: str,
-            user_id: str = "default",
-            max_workers: int = 3,
-            force_workers: Optional[List[WorkerType]] = None
+        self,
+        query: str,
+        user_id: str = "default",
+        max_workers: int = 3,
+        force_workers: Optional[List[WorkerType]] = None
     ) -> str:
         """
         Main orchestration method
@@ -111,100 +111,118 @@ class WorkerOrchestrator:
 
         # Format final response
         final_response = self._format_final_response(
-            synthesis,
+            query,
             worker_results,
-            context_store
+            synthesis
         )
 
-        execution_time = (datetime.now() - start_time).total_seconds()
-
+        # Log completion
+        duration = (datetime.now() - start_time).total_seconds()
         logger.info(
             "orchestration_completed",
-            workers_executed=len(worker_results),
-            execution_time=execution_time,
-            success_rate=sum(1 for r in worker_results if r.success) / len(worker_results)
+            duration=duration,
+            workers_used=len(worker_results),
+            success_count=sum(1 for r in worker_results if r.success)
         )
 
         return final_response
 
     async def _execute_workers_concurrently(
-            self,
-            workers: List[BaseWorker],
-            user_id: str
+        self,
+        workers: List[BaseWorker],
+        user_id: str
     ) -> List[WorkerResult]:
         """
-        Execute multiple workers concurrently
+        Execute all workers concurrently with timeout protection
 
         Args:
-            workers: List of worker instances
-            user_id: User identifier
+            workers: List of worker instances to execute
+            user_id: User identifier for logging
 
         Returns:
-            List of worker results
+            List of WorkerResult objects
         """
-        tasks = [worker.execute(user_id) for worker in workers]
+        logger.info("executing_workers_concurrently", count=len(workers))
 
-        # Execute with timeout
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=120.0  # 2 minute timeout
-            )
+        async def execute_with_timeout(worker: BaseWorker) -> WorkerResult:
+            """Execute single worker with timeout"""
+            try:
+                # 2-minute timeout per worker
+                result = await asyncio.wait_for(
+                    worker.execute(user_id),
+                    timeout=120.0
+                )
+                logger.info(
+                    "worker_completed",
+                    worker_type=worker.worker_type.value,
+                    success=result.success,
+                    execution_time=result.execution_time
+                )
+                return result
+            except asyncio.TimeoutError:
+                logger.error(
+                    "worker_timeout",
+                    worker_type=worker.worker_type.value
+                )
+                # Return failed result
+                return WorkerResult(
+                    worker_type=worker.worker_type,
+                    success=False,
+                    data={},
+                    recommendations=[],
+                    confidence=0.0,
+                    execution_time=120.0,
+                    sources=[],
+                    error="Worker execution timed out after 120 seconds"
+                )
+            except Exception as e:
+                logger.error(
+                    "worker_failed",
+                    worker_type=worker.worker_type.value,
+                    error=str(e)
+                )
+                return WorkerResult(
+                    worker_type=worker.worker_type,
+                    success=False,
+                    data={},
+                    recommendations=[],
+                    confidence=0.0,
+                    execution_time=0.0,
+                    sources=[],
+                    error=str(e)
+                )
 
-            # Filter out exceptions
-            valid_results = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(
-                        "worker_exception",
-                        worker=workers[i].worker_type.value,
-                        error=str(result)
-                    )
-                    # Create failed result
-                    valid_results.append(WorkerResult(
-                        worker_type=workers[i].worker_type,
-                        success=False,
-                        data={},
-                        recommendations=[],
-                        confidence=0.0,
-                        execution_time=0.0,
-                        sources=[],
-                        error=str(result)
-                    ))
-                else:
-                    valid_results.append(result)
+        # Execute all workers concurrently
+        tasks = [execute_with_timeout(worker) for worker in workers]
+        results = await asyncio.gather(*tasks)
 
-            return valid_results
-
-        except asyncio.TimeoutError:
-            logger.error("worker_execution_timeout")
-            return []
+        return list(results)
 
     async def _synthesize_results(
-            self,
-            query: str,
-            worker_results: List[WorkerResult],
-            context_store: SharedContextStore
-    ) -> Dict[str, Any]:
+        self,
+        query: str,
+        worker_results: List[WorkerResult],
+        context_store: SharedContextStore
+    ) -> str:
         """
-        Synthesize results from multiple workers using LLM
+        Use LLM to synthesize worker results into coherent response
 
         Args:
-            query: Original query
+            query: Original user query
             worker_results: Results from all workers
-            context_store: Shared context
+            context_store: Shared context store
 
         Returns:
-            Synthesized analysis
+            Synthesized response text
         """
         if not self.client:
-            return self._basic_synthesis(worker_results)
+            # Fallback: simple concatenation
+            return self._simple_synthesis(query, worker_results)
 
-        # Prepare synthesis prompt
-        synthesis_prompt = self._build_synthesis_prompt(
-            query,
-            worker_results
-        )
+        logger.info("synthesizing_results", worker_count=len(worker_results))
+
+        # Build synthesis prompt
+        synthesis_prompt = self._build_synthesis_prompt(query, worker_results)
 
         try:
             response = await self.client.chat.completions.create(
@@ -212,182 +230,173 @@ class WorkerOrchestrator:
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are a Senior Restaurant Consultant synthesizing insights from multiple domain experts.
+                        "content": """You are a master synthesizer that combines insights from domain specialists into comprehensive, actionable strategies.
 
-Your task:
-1. Integrate insights from all specialists
-2. Identify common themes and conflicts
-3. Provide a coherent, actionable strategy
-4. Highlight priorities and next steps
+Your job:
+1. Identify common themes and synergies across specialist insights
+2. Resolve any conflicts or contradictions
+3. Prioritize recommendations by impact
+4. Create a coherent, easy-to-follow action plan
+5. Maintain the expertise and confidence levels from each specialist
 
-Be concise, strategic, and practical."""
+Format your synthesis professionally with clear sections and actionable steps."""
                     },
                     {
                         "role": "user",
                         "content": synthesis_prompt
                     }
                 ],
-                temperature=0.3,
-                max_tokens=3000
+                temperature=0.4,
+                max_tokens=4000
             )
 
-            synthesis_text = response.choices[0].message.content
-
-            return {
-                "synthesis": synthesis_text,
-                "approach": "llm_synthesis",
-                "worker_count": len(worker_results),
-                "timestamp": datetime.now().isoformat()
-            }
+            synthesis = response.choices[0].message.content or "Synthesis failed"
+            logger.info("synthesis_completed", length=len(synthesis))
+            return synthesis
 
         except Exception as e:
             logger.error("synthesis_failed", error=str(e))
-            return self._basic_synthesis(worker_results)
+            return self._simple_synthesis(query, worker_results)
 
     def _build_synthesis_prompt(
-            self,
-            query: str,
-            worker_results: List[WorkerResult]
+        self,
+        query: str,
+        worker_results: List[WorkerResult]
     ) -> str:
-        """Build prompt for synthesis"""
+        """Build the prompt for LLM synthesis"""
+
         prompt_parts = [
-            f"Original Query: {query}\n",
-            "\n=== SPECIALIST INSIGHTS ===\n"
+            f"# Original Query",
+            f"{query}\n",
+            f"# Specialist Insights\n"
         ]
 
         for result in worker_results:
             if result.success:
-                prompt_parts.append(f"\n## {result.worker_type.value.replace('_', ' ').title()}")
-                prompt_parts.append(f"Confidence: {result.confidence:.2f}")
+                prompt_parts.append(f"## {result.worker_type.value.replace('_', ' ').title()}")
+                prompt_parts.append(f"**Confidence:** {result.confidence * 100:.0f}%")
+                prompt_parts.append(f"**Execution Time:** {result.execution_time:.1f}s\n")
 
+                # Add key findings
+                if result.data:
+                    prompt_parts.append("**Key Findings:**")
+                    for key, value in result.data.items():
+                        if isinstance(value, str) and len(value) < 500:
+                            prompt_parts.append(f"- {key}: {value}")
+                        elif isinstance(value, (list, dict)):
+                            prompt_parts.append(f"- {key}: {str(value)[:200]}...")
+
+                # Add recommendations
                 if result.recommendations:
-                    prompt_parts.append("\nRecommendations:")
-                    for i, rec in enumerate(result.recommendations[:5], 1):
-                        prompt_parts.append(f"{i}. {rec}")
+                    prompt_parts.append("\n**Recommendations:**")
+                    for rec in result.recommendations[:5]:  # Top 5
+                        prompt_parts.append(f"- {rec}")
 
-                # Add key points from data
-                if "key_points" in result.data:
-                    prompt_parts.append("\nKey Points:")
-                    for point in result.data["key_points"][:3]:
-                        prompt_parts.append(f"- {point}")
+                # Add sources
+                if result.sources:
+                    prompt_parts.append(f"\n**Sources:** {', '.join(result.sources[:3])}")
 
-                prompt_parts.append("")
+                prompt_parts.append("\n")
+            else:
+                prompt_parts.append(f"## {result.worker_type.value.replace('_', ' ').title()}")
+                prompt_parts.append(f"❌ Failed: {result.error}\n")
 
-        prompt_parts.append("\n=== YOUR TASK ===")
-        prompt_parts.append(
-            "Synthesize these specialist insights into a coherent, actionable response. "
-            "Prioritize recommendations, note any conflicts, and provide clear next steps."
-        )
+        prompt_parts.append("\n# Your Task")
+        prompt_parts.append("Synthesize these specialist insights into a comprehensive, actionable strategy.")
+        prompt_parts.append("Focus on:\n1. Integration of insights\n2. Prioritized recommendations\n3. Action steps\n4. Expected outcomes")
 
         return "\n".join(prompt_parts)
 
-    def _basic_synthesis(
-            self,
-            worker_results: List[WorkerResult]
-    ) -> Dict[str, Any]:
-        """Basic synthesis without LLM (fallback)"""
-        all_recommendations = []
-        all_sources = []
-        total_confidence = 0.0
-        success_count = 0
-
-        for result in worker_results:
-            if result.success:
-                all_recommendations.extend(result.recommendations)
-                all_sources.extend(result.sources)
-                total_confidence += result.confidence
-                success_count += 1
-
-        avg_confidence = total_confidence / success_count if success_count > 0 else 0.0
-
-        synthesis_text = "Based on analysis from multiple specialists:\n\n"
-
-        for result in worker_results:
-            if result.success:
-                synthesis_text += f"**{result.worker_type.value.replace('_', ' ').title()}** "
-                synthesis_text += f"(confidence: {result.confidence:.0%}):\n"
-                for rec in result.recommendations[:3]:
-                    synthesis_text += f"- {rec}\n"
-                synthesis_text += "\n"
-
-        return {
-            "synthesis": synthesis_text,
-            "approach": "basic_synthesis",
-            "worker_count": len(worker_results),
-            "avg_confidence": avg_confidence,
-            "timestamp": datetime.now().isoformat()
-        }
-
-    def _format_final_response(
-            self,
-            synthesis: Dict[str, Any],
-            worker_results: List[WorkerResult],
-            context_store: SharedContextStore
+    def _simple_synthesis(
+        self,
+        query: str,
+        worker_results: List[WorkerResult]
     ) -> str:
-        """Format the final response for the user"""
-        response_parts = []
+        """Fallback synthesis without LLM"""
 
-        # Add synthesis
-        response_parts.append("# 🎯 Strategic Consultation\n")
-        response_parts.append(synthesis["synthesis"])
+        lines = [
+            "# 🎯 Multi-Agent Analysis Results\n",
+            f"**Query:** {query}\n",
+            "---\n"
+        ]
 
-        # Add section divider
-        response_parts.append("\n" + "=" * 70 + "\n")
+        successful = [r for r in worker_results if r.success]
+        failed = [r for r in worker_results if not r.success]
 
-        # Add specialist contributions
-        response_parts.append("## 👥 Specialist Insights\n")
-
-        for result in worker_results:
-            if result.success:
+        if successful:
+            lines.append("## ✅ Specialist Insights\n")
+            for result in successful:
                 worker_name = result.worker_type.value.replace('_', ' ').title()
-                response_parts.append(f"\n### {worker_name}")
-                response_parts.append(f"*Confidence: {result.confidence:.0%}*\n")
+                lines.append(f"### {worker_name}")
+                lines.append(f"*Confidence: {result.confidence * 100:.0f}%*\n")
 
                 if result.recommendations:
                     for i, rec in enumerate(result.recommendations[:5], 1):
-                        response_parts.append(f"{i}. {rec}")
+                        lines.append(f"{i}. {rec}")
 
-                response_parts.append("")
+                lines.append("")
 
-        # Add sources if available
-        all_sources = []
-        for result in worker_results:
-            all_sources.extend(result.sources)
+        if failed:
+            lines.append("\n## ⚠️ Incomplete Analysis")
+            for result in failed:
+                worker_name = result.worker_type.value.replace('_', ' ').title()
+                lines.append(f"- {worker_name}: {result.error}")
 
-        if all_sources:
-            unique_sources = list(set(all_sources))[:10]
-            response_parts.append("\n" + "=" * 70)
-            response_parts.append("\n## 📚 Sources\n")
-            for i, source in enumerate(unique_sources, 1):
-                response_parts.append(f"[{i}] {source}")
+        lines.append("\n---")
+        lines.append(f"*Analysis completed using {len(successful)} specialist(s)*")
 
-        # Add metadata
-        response_parts.append("\n" + "=" * 70)
-        response_parts.append(f"\n*Analysis by {len(worker_results)} specialist(s) • "
-                              f"Orchestrated consultation • "
-                              f"{datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+        return "\n".join(lines)
 
-        return "\n".join(response_parts)
+    def _format_final_response(
+        self,
+        query: str,
+        worker_results: List[WorkerResult],
+        synthesis: str
+    ) -> str:
+        """
+        Format the final response with synthesis and metadata
 
-    def get_available_workers(self) -> List[str]:
-        """Get list of available worker types"""
-        return [wt.value for wt in WorkerType]
+        Args:
+            query: Original query
+            worker_results: Worker results
+            synthesis: Synthesized text
 
-    async def explain_workers(self, query: str) -> str:
-        """Explain which workers would be used for a query"""
-        worker_types = WorkerTemplates.recommend_workers(query, max_workers=5)
+        Returns:
+            Formatted final response
+        """
 
-        explanation = [
-            f"For query: '{query[:100]}...'\n",
-            "Recommended specialists:\n"
+        # Header
+        response_parts = [
+            "🎭 **Multi-Agent Orchestration Response**\n",
+            "=" * 70,
+            ""
         ]
 
-        for i, wt in enumerate(worker_types, 1):
-            template = WorkerTemplates.get_template(wt)
-            explanation.append(
-                f"{i}. **{wt.value.replace('_', ' ').title()}** "
-                f"(Priority: {template.get('priority', 3)})"
-            )
-            explanation.append(f"   Tools: {', '.join(template.get('tools', []))}\n")
+        # Main synthesis
+        response_parts.append(synthesis)
+        response_parts.append("")
 
-        return "\n".join(explanation)
+        # Metadata footer
+        response_parts.append("=" * 70)
+        response_parts.append("## 📊 Orchestration Metadata\n")
+
+        successful = [r for r in worker_results if r.success]
+        total_time = sum(r.execution_time for r in worker_results)
+
+        response_parts.append(f"**Workers Engaged:** {len(worker_results)}")
+        response_parts.append(f"**Successful:** {len(successful)}/{len(worker_results)}")
+        response_parts.append(f"**Total Execution Time:** {total_time:.1f}s")
+
+        # List workers used
+        worker_names = [r.worker_type.value.replace('_', ' ').title() for r in successful]
+        response_parts.append(f"**Specialists:** {', '.join(worker_names)}")
+
+        # Collect all unique sources
+        all_sources = set()
+        for result in successful:
+            all_sources.update(result.sources)
+
+        if all_sources:
+            response_parts.append(f"\n**Sources Consulted:** {len(all_sources)}")
+
+        return "\n".join(response_parts)
