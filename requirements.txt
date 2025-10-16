@@ -10,6 +10,7 @@ pydantic
 pytest
 pytest-cov
 pytest-mock
+pytest-asyncio
 
 # Development
 black
@@ -27,14 +28,19 @@ pandas
 
 # Vector database
 chromadb
+pinecone
+
+# Async & HTTP
+httpx
+aiofiles
+aiolimiter
+tenacity
+
+# Wikipedia
+wikipedia
 
 # Progress bars
 tqdm
 
-pinecone
-wikipedia
-tenacity
-httpx
-aiofiles
-aiolimiter
+# Web UI
 streamlit

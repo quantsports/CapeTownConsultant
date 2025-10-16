@@ -4,7 +4,8 @@ Assistant interface with Phase 2 enhancements
 - Progress callbacks
 - Smart caching integration
 """
-
+import asyncio
+import re
 from typing import Dict, Optional, AsyncIterator
 
 from src.agent.autonomous import AutonomousAgent

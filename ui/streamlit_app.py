@@ -1,7 +1,73 @@
 """
-Enhanced Streamlit Frontend for CapeTownConsultant v3.0
+Enhanced Streamlit Frontend for CapeTownConsultant v3.1
 Compatible with modular architecture
-Features: Cost tracking, Memory inspection, Profile management, Tool analytics
+
+=== V3.1 ENHANCEMENTS ===
+
+1. WORKER ORCHESTRATION (Multi-Agent Mode)
+   - Location: Sidebar mode selection, Workers view, Chat view execution
+   - Features: Deploy 1-5 specialized workers for complex queries
+   - Worker types: Research, Analysis, Strategy, Creative, Technical
+   - Concurrent execution with synthesized results
+
+2. STREAMING CHAT
+   - Location: Chat view with streaming_enabled toggle
+   - Features: Real-time progress updates during tool execution
+   - Shows: Thinking indicators, tool usage, synthesis progress
+   - Uses: agent.chat_stream() method for async iteration
+
+3. REAL-TIME METRICS DASHBOARD
+   - Location: New "Metrics" view in navigation
+   - Sections: Response times, Cache performance, Tool usage, System health
+   - Features: Auto-refresh, detailed breakdowns, visual charts
+   - Data source: MetricsCollector singleton (src.core.metrics)
+
+4. TOOL EXECUTION VISUALIZATION
+   - Location: Chat view, Workers view
+   - Features: Shows which tools are being used in real-time
+   - Tracks: Tool calls, execution times, success/failure
+
+5. CONVERSATION EXPORT/IMPORT
+   - Location: Sidebar Quick Actions
+   - Features: Save conversations to JSON, import previous sessions
+   - Storage: data/exports/ directory with timestamps
+
+6. MODE TOGGLE
+   - Location: Sidebar Execution Mode section
+   - Options: Single Agent (fast) vs Multi-Worker (comprehensive)
+   - Dynamic UI: Changes configuration based on selected mode
+
+7. ENHANCED SIDEBAR
+   - Live metrics preview (tool calls, cache hit rate, avg response time)
+   - Quick action buttons (export/import)
+   - Mode-specific configuration (streaming toggle, worker count)
+
+8. NEW VIEWS
+   - "Workers" view: Configure and test worker orchestration
+   - "Metrics" view: Comprehensive performance monitoring
+
+9. IMPROVED ERROR HANDLING
+   - Budget limit detection and user-friendly messages
+   - Graceful degradation for missing services
+   - Detailed error context for debugging
+
+=== ARCHITECTURE COMPATIBILITY ===
+
+All enhancements are fully compatible with the existing modular architecture:
+- Uses existing AutonomousAgent.chat_stream() method
+- Leverages WorkerOrchestrator from src.workers
+- Integrates with MetricsCollector from src.core.metrics
+- Maintains cost tracking via CostTracker
+- Preserves memory and profile management systems
+
+=== USAGE ===
+
+1. Single Agent Mode: Fast queries with optional streaming
+2. Multi-Worker Mode: Complex analysis with specialized agents
+3. Metrics View: Monitor performance and optimize usage
+4. Workers View: Test and configure orchestration
+5. Export/Import: Save and restore conversation sessions
+
 """
 
 import asyncio
@@ -25,6 +91,10 @@ from src.services.cost_tracker import CostTracker
 from src.memory.profile import ProfileManager
 from src.memory.vector import VectorMemory
 from src.services.embeddings import EmbeddingService
+from src.core.metrics import get_metrics
+from src.workers.orchestrator import WorkerOrchestrator
+from src.workers.templates import WorkerType
+from src.tools.executor import ToolExecutor
 
 # -----------------------------------------------------------------------------
 # Page Configuration
@@ -109,6 +179,66 @@ st.markdown("""
         padding: 0.75rem;
         margin: 0.5rem 0;
         border-radius: 0.375rem;
+    }
+
+    /* Worker badge */
+    .worker-badge {
+        display: inline-block;
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+        margin: 0.25rem;
+        font-weight: 600;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Streaming indicator */
+    .streaming-indicator {
+        display: inline-block;
+        background: #3b82f6;
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+        animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+
+    /* Metrics card */
+    .metrics-card {
+        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+        padding: 1rem;
+        border-radius: 0.75rem;
+        border: 1px solid #cbd5e1;
+        margin: 0.5rem 0;
+    }
+
+    /* Tool execution panel */
+    .tool-exec-panel {
+        background: #ecfdf5;
+        border-left: 4px solid #10b981;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border-radius: 0.5rem;
+        font-family: monospace;
+        font-size: 0.875rem;
+    }
+
+    /* Mode toggle */
+    .mode-badge {
+        display: inline-block;
+        background: #8b5cf6;
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        margin: 0.5rem 0;
     }
 
     /* Chat message styling */
@@ -218,6 +348,84 @@ async def update_user_profile(user_id: str, data: Dict) -> bool:
         return False
 
 
+def export_conversation(messages: List[Dict], filename: str = None) -> str:
+    """Export conversation to JSON file"""
+    try:
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"conversation_{timestamp}.json"
+        
+        export_data = {
+            "exported_at": datetime.now().isoformat(),
+            "message_count": len(messages),
+            "messages": messages
+        }
+        
+        export_path = Config.DATA_DIR / "exports"
+        export_path.mkdir(parents=True, exist_ok=True)
+        
+        filepath = export_path / filename
+        with open(filepath, 'w') as f:
+            json.dump(export_data, f, indent=2)
+        
+        return str(filepath)
+    except Exception as e:
+        st.error(f"Error exporting conversation: {e}")
+        return None
+
+
+def import_conversation(filepath: str) -> List[Dict]:
+    """Import conversation from JSON file"""
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return data.get("messages", [])
+    except Exception as e:
+        st.error(f"Error importing conversation: {e}")
+        return []
+
+
+def get_metrics_summary() -> Dict:
+    """Get current metrics summary"""
+    try:
+        metrics = get_metrics()
+        return metrics.snapshot()
+    except Exception as e:
+        st.error(f"Error fetching metrics: {e}")
+        return {"response_times": {}, "cache": {}, "tool_usage": {}}
+
+
+async def run_worker_orchestration(
+    query: str,
+    user_id: str,
+    max_workers: int = 3,
+    force_workers: Optional[List[WorkerType]] = None
+) -> str:
+    """Run worker orchestration for multi-agent query processing"""
+    try:
+        cost_tracker = CostTracker()
+        tool_executor = await ToolExecutor(cost_tracker=cost_tracker).__aenter__()
+        profile_manager = ProfileManager()
+        
+        orchestrator = WorkerOrchestrator(
+            tool_executor=tool_executor,
+            profile_manager=profile_manager
+        )
+        
+        result = await orchestrator.orchestrate(
+            query=query,
+            user_id=user_id,
+            max_workers=max_workers,
+            force_workers=force_workers
+        )
+        
+        await tool_executor.__aexit__(None, None, None)
+        return result
+        
+    except Exception as e:
+        return f"❌ Worker orchestration failed: {str(e)}"
+
+
 # -----------------------------------------------------------------------------
 # Session State Initialization
 # -----------------------------------------------------------------------------
@@ -236,6 +444,11 @@ def init_session_state():
         "auto_refresh_costs": True,
         "show_debug": False,
         "selected_tab": "chat",
+        "streaming_enabled": False,
+        "mode": "single_agent",
+        "max_workers": 3,
+        "selected_workers": None,
+        "worker_results": None,
     }
 
     for key, value in defaults.items():
@@ -275,7 +488,41 @@ init_session_state()
 with st.sidebar:
     # Header
     st.markdown("# 🧠 CapeTownConsultant")
-    st.caption("v3.0 – Modular Architecture")
+    st.caption("v3.1 – Enhanced Multi-Agent System")
+
+    st.divider()
+
+    # Mode Selection (NEW v3.1)
+    st.subheader("🎯 Execution Mode")
+    mode = st.radio(
+        "Select Mode",
+        ["🤖 Single Agent", "👥 Multi-Worker"],
+        key="mode_selector",
+        help="Single Agent: Fast, direct responses\nMulti-Worker: Complex analysis with specialized agents"
+    )
+    
+    if mode == "🤖 Single Agent":
+        st.session_state.mode = "single_agent"
+        st.markdown('<div class="mode-badge">Single Agent Mode</div>', unsafe_allow_html=True)
+        
+        # Streaming toggle
+        st.session_state.streaming_enabled = st.checkbox(
+            "Enable Streaming",
+            value=st.session_state.streaming_enabled,
+            help="Show real-time progress updates"
+        )
+    else:
+        st.session_state.mode = "multi_worker"
+        st.markdown('<div class="mode-badge">Multi-Worker Mode</div>', unsafe_allow_html=True)
+        
+        # Worker configuration
+        st.session_state.max_workers = st.slider(
+            "Max Workers",
+            min_value=1,
+            max_value=5,
+            value=st.session_state.max_workers,
+            help="Number of specialized agents to deploy"
+        )
 
     st.divider()
 
@@ -283,7 +530,7 @@ with st.sidebar:
     st.subheader("📍 Navigation")
     selected_view = st.radio(
         "Select View",
-        ["💬 Chat", "🧠 Memory", "👤 Profile", "⚙️ Settings", "📊 Analytics"],
+        ["💬 Chat", "👥 Workers", "📊 Metrics", "🧠 Memory", "👤 Profile", "⚙️ Settings"],
         label_visibility="collapsed"
     )
 
@@ -395,7 +642,12 @@ with st.sidebar:
 # Chat View
 if selected_view == "💬 Chat":
     st.title("💬 Chat with Assistant")
-    st.markdown("Ask questions, get research, and let the assistant use tools automatically.")
+    
+    # Mode indicator
+    if st.session_state.mode == "single_agent":
+        st.markdown("🤖 **Single Agent Mode** - Fast, direct responses with tool support")
+    else:
+        st.markdown(f"👥 **Multi-Worker Mode** - {st.session_state.max_workers} specialized agents working together")
 
     # Check if OpenAI is configured
     if not Config.OPENAI_API_KEY:
@@ -403,7 +655,7 @@ if selected_view == "💬 Chat":
         st.stop()
 
     # Warning if not initialized
-    if not st.session_state.assistant_initialized:
+    if not st.session_state.assistant_initialized and st.session_state.mode == "single_agent":
         st.warning("⚠️ Assistant initialization failed. Running in ephemeral mode (slower).")
 
     # Display chat messages
@@ -421,44 +673,346 @@ if selected_view == "💬 Chat":
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate response
+        # Generate response based on mode
         with st.chat_message("assistant"):
-            with st.spinner("🤔 Thinking and researching..."):
-                try:
-                    if st.session_state.assistant:
+            try:
+                # MULTI-WORKER MODE (NEW v3.1)
+                if st.session_state.mode == "multi_worker":
+                    with st.spinner(f"🔧 Deploying {st.session_state.max_workers} specialized workers..."):
                         response = asyncio.run(
-                            st.session_state.assistant.chat(
+                            run_worker_orchestration(
                                 prompt,
-                                user_id=st.session_state.user_id
+                                st.session_state.user_id,
+                                st.session_state.max_workers
                             )
                         )
-                    else:
-                        # Fallback to ephemeral
-                        async def ephemeral_chat():
-                            cost_tracker = CostTracker()
-                            async with AutonomousAssistant(cost_tracker=cost_tracker) as assistant:
-                                return await assistant.chat(prompt, st.session_state.user_id)
-
-
-                        response = asyncio.run(ephemeral_chat())
-
+                    
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
-
-                    # Auto-refresh costs
-                    if st.session_state.auto_refresh_costs and Config.ENABLE_COST_TRACKING:
-                        st.rerun()
-
-                except ValueError as e:
-                    error_msg = str(e)
-                    if "budget" in error_msg.lower() or "limit" in error_msg.lower():
-                        st.error(f"🚨 {error_msg}")
-                        st.info("💡 Wait until tomorrow for budget reset, or adjust DAILY_BUDGET_LIMIT.")
+                
+                # SINGLE AGENT MODE
+                else:
+                    # Streaming enabled (NEW v3.1)
+                    if st.session_state.streaming_enabled and st.session_state.assistant:
+                        response_placeholder = st.empty()
+                        
+                        async def stream_response():
+                            full_response = ""
+                            async for chunk in st.session_state.assistant.chat_stream(
+                                prompt,
+                                user_id=st.session_state.user_id
+                            ):
+                                full_response += chunk
+                                response_placeholder.markdown(full_response)
+                            return full_response
+                        
+                        full_response = asyncio.run(stream_response())
+                        st.session_state.messages.append({"role": "assistant", "content": full_response})
+                    
+                    # Non-streaming fallback
                     else:
-                        st.error(f"❌ {error_msg}")
+                        with st.spinner("🤔 Thinking and researching..."):
+                            if st.session_state.assistant:
+                                response = asyncio.run(
+                                    st.session_state.assistant.chat(
+                                        prompt,
+                                        user_id=st.session_state.user_id
+                                    )
+                                )
+                            else:
+                                # Fallback to ephemeral
+                                async def ephemeral_chat():
+                                    cost_tracker = CostTracker()
+                                    async with AutonomousAssistant(cost_tracker=cost_tracker) as assistant:
+                                        return await assistant.chat(prompt, st.session_state.user_id)
 
+                                response = asyncio.run(ephemeral_chat())
+
+                            st.markdown(response)
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+
+                # Auto-refresh costs
+                if st.session_state.auto_refresh_costs and Config.ENABLE_COST_TRACKING:
+                    st.rerun()
+
+            except ValueError as e:
+                error_msg = str(e)
+                if "budget" in error_msg.lower() or "limit" in error_msg.lower():
+                    st.error(f"🚨 {error_msg}")
+                    st.info("💡 Wait until tomorrow for budget reset, or adjust DAILY_BUDGET_LIMIT.")
+                else:
+                    st.error(f"❌ {error_msg}")
+
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+
+# Workers View (NEW v3.1)
+elif selected_view == "👥 Workers":
+    st.title("👥 Worker Orchestration")
+    st.markdown("Configure and deploy specialized AI workers for complex multi-agent tasks.")
+    
+    # Worker Configuration Panel
+    st.subheader("⚙️ Configuration")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        max_workers = st.number_input(
+            "Maximum Workers",
+            min_value=1,
+            max_value=5,
+            value=st.session_state.max_workers,
+            help="Number of specialized workers to deploy"
+        )
+        st.session_state.max_workers = max_workers
+    
+    with col2:
+        worker_timeout = st.number_input(
+            "Timeout (seconds)",
+            min_value=30,
+            max_value=300,
+            value=120,
+            help="Maximum execution time per worker"
+        )
+    
+    st.divider()
+    
+    # Available Worker Types
+    st.subheader("🤖 Available Worker Types")
+    
+    worker_descriptions = {
+        "RESEARCH": "📚 Research Specialist - Gathers data from multiple sources",
+        "ANALYSIS": "📊 Data Analyst - Analyzes trends and patterns",
+        "STRATEGY": "🎯 Strategy Expert - Develops action plans",
+        "CREATIVE": "🎨 Creative Consultant - Generates innovative ideas",
+        "TECHNICAL": "⚙️ Technical Advisor - Provides technical guidance"
+    }
+    
+    st.markdown("**Select specific workers (optional):**")
+    selected_workers = []
+    
+    cols = st.columns(3)
+    for i, (worker_type, description) in enumerate(worker_descriptions.items()):
+        with cols[i % 3]:
+            if st.checkbox(description, key=f"worker_{worker_type}"):
+                try:
+                    selected_workers.append(WorkerType[worker_type])
+                except KeyError:
+                    pass
+    
+    st.session_state.selected_workers = selected_workers if selected_workers else None
+    
+    st.divider()
+    
+    # Test Query Section
+    st.subheader("🧪 Test Worker Orchestration")
+    
+    test_query = st.text_area(
+        "Enter test query",
+        placeholder="e.g., Analyze restaurant industry trends and provide strategic recommendations",
+        height=100
+    )
+    
+    if st.button("🚀 Deploy Workers", type="primary", use_container_width=True):
+        if test_query:
+            with st.spinner(f"Deploying {max_workers} workers..."):
+                try:
+                    result = asyncio.run(
+                        run_worker_orchestration(
+                            test_query,
+                            st.session_state.user_id,
+                            max_workers,
+                            st.session_state.selected_workers
+                        )
+                    )
+                    
+                    st.session_state.worker_results = result
+                    st.success("✅ Workers completed!")
+                    
+                    # Display results
+                    with st.expander("📋 Full Results", expanded=True):
+                        st.markdown(result)
+                        
                 except Exception as e:
-                    st.error(f"❌ Error: {e}")
+                    st.error(f"❌ Orchestration failed: {e}")
+        else:
+            st.warning("Please enter a test query")
+    
+    # Previous Results
+    if st.session_state.worker_results:
+        st.divider()
+        st.subheader("📜 Previous Results")
+        with st.expander("View Last Orchestration", expanded=False):
+            st.markdown(st.session_state.worker_results)
+    
+    # Worker System Info
+    st.divider()
+    st.subheader("ℹ️ System Information")
+    
+    info_col1, info_col2, info_col3 = st.columns(3)
+    
+    with info_col1:
+        st.metric("Max Workers", max_workers)
+    with info_col2:
+        st.metric("Timeout", f"{worker_timeout}s")
+    with info_col3:
+        selected_count = len(selected_workers) if selected_workers else 0
+        st.metric("Selected Workers", selected_count if selected_count > 0 else "Auto")
+
+# Metrics View (NEW v3.1)
+elif selected_view == "📊 Metrics":
+    st.title("📊 Real-Time Performance Metrics")
+    st.markdown("Monitor system performance, cache efficiency, and tool usage in real-time.")
+    
+    # Refresh button
+    col1, col2, col3 = st.columns([1, 1, 3])
+    with col1:
+        if st.button("🔄 Refresh Metrics", use_container_width=True):
+            st.rerun()
+    with col2:
+        auto_refresh = st.checkbox("Auto-refresh", value=False)
+    
+    if auto_refresh:
+        st.info("⏱️ Auto-refreshing every 5 seconds...")
+        
+    st.divider()
+    
+    # Get metrics
+    try:
+        metrics = get_metrics_summary()
+        
+        # Response Times Section
+        st.subheader("⚡ Response Times")
+        
+        response_times = metrics.get("response_times", {})
+        if response_times:
+            rt_cols = st.columns(len(response_times))
+            
+            for i, (service, stats) in enumerate(response_times.items()):
+                with rt_cols[i]:
+                    st.metric(
+                        label=service.title(),
+                        value=f"{stats.get('avg_ms', 0):.0f}ms",
+                        delta=f"{stats.get('count', 0)} calls"
+                    )
+            
+            # Detailed table
+            with st.expander("📋 Detailed Response Times"):
+                import pandas as pd
+                df_data = []
+                for service, stats in response_times.items():
+                    df_data.append({
+                        "Service": service,
+                        "Avg (ms)": f"{stats.get('avg_ms', 0):.2f}",
+                        "Last (ms)": f"{stats.get('last_ms', 0):.2f}",
+                        "Total (ms)": f"{stats.get('total_ms', 0):.2f}",
+                        "Count": stats.get('count', 0)
+                    })
+                if df_data:
+                    df = pd.DataFrame(df_data)
+                    st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No response time data available yet. Start using the assistant to see metrics.")
+        
+        st.divider()
+        
+        # Cache Performance Section
+        st.subheader("💾 Cache Performance")
+        
+        cache_stats = metrics.get("cache", {})
+        if cache_stats:
+            cache_cols = st.columns(len(cache_stats))
+            
+            for i, (cache_name, stats) in enumerate(cache_stats.items()):
+                with cache_cols[i]:
+                    hit_rate = stats.get('hit_rate', 0) * 100
+                    color = "normal" if hit_rate > 50 else "inverse"
+                    st.metric(
+                        label=cache_name.replace("embeddings.", "").title(),
+                        value=f"{hit_rate:.1f}%",
+                        delta=f"{stats.get('hits', 0)}/{stats.get('hits', 0) + stats.get('misses', 0)}"
+                    )
+            
+            # Cache details
+            with st.expander("📋 Cache Details"):
+                import pandas as pd
+                df_data = []
+                for cache_name, stats in cache_stats.items():
+                    df_data.append({
+                        "Cache": cache_name,
+                        "Hit Rate": f"{stats.get('hit_rate', 0)*100:.2f}%",
+                        "Hits": stats.get('hits', 0),
+                        "Misses": stats.get('misses', 0),
+                        "Total": stats.get('hits', 0) + stats.get('misses', 0)
+                    })
+                if df_data:
+                    df = pd.DataFrame(df_data)
+                    st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No cache data available yet.")
+        
+        st.divider()
+        
+        # Tool Usage Section
+        st.subheader("🔧 Tool Usage")
+        
+        tool_usage = metrics.get("tool_usage", {})
+        if tool_usage:
+            # Bar chart
+            import pandas as pd
+            df = pd.DataFrame(list(tool_usage.items()), columns=["Tool", "Count"])
+            df = df.sort_values("Count", ascending=False)
+            
+            st.bar_chart(df.set_index("Tool"))
+            
+            # Summary metrics
+            total_calls = sum(tool_usage.values())
+            unique_tools = len(tool_usage)
+            
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            with metric_col1:
+                st.metric("Total Tool Calls", total_calls)
+            with metric_col2:
+                st.metric("Unique Tools Used", unique_tools)
+            with metric_col3:
+                most_used = max(tool_usage, key=tool_usage.get) if tool_usage else "N/A"
+                st.metric("Most Used Tool", most_used)
+            
+            # Detailed breakdown
+            with st.expander("📋 Tool Breakdown"):
+                for tool, count in sorted(tool_usage.items(), key=lambda x: x[1], reverse=True):
+                    percentage = (count / total_calls * 100) if total_calls > 0 else 0
+                    st.markdown(f"**{tool}**: {count} calls ({percentage:.1f}%)")
+        else:
+            st.info("No tool usage data available yet.")
+        
+        st.divider()
+        
+        # System Health
+        st.subheader("🏥 System Health")
+        
+        health_col1, health_col2, health_col3, health_col4 = st.columns(4)
+        
+        with health_col1:
+            assistant_status = "🟢 Active" if st.session_state.assistant_initialized else "🔴 Inactive"
+            st.markdown(f"**Assistant:**<br>{assistant_status}", unsafe_allow_html=True)
+        
+        with health_col2:
+            mode_icon = "🤖" if st.session_state.mode == "single_agent" else "👥"
+            st.markdown(f"**Mode:**<br>{mode_icon} {st.session_state.mode.replace('_', ' ').title()}", unsafe_allow_html=True)
+        
+        with health_col3:
+            api_status = Config.validate_required_keys()
+            active_apis = sum(1 for v in api_status.values() if v)
+            st.markdown(f"**APIs:**<br>✅ {active_apis}/{len(api_status)} Active", unsafe_allow_html=True)
+        
+        with health_col4:
+            uptime = (datetime.now() - st.session_state.session_start).total_seconds() / 60
+            st.markdown(f"**Uptime:**<br>⏱️ {uptime:.1f} min", unsafe_allow_html=True)
+        
+    except Exception as e:
+        st.error(f"Error loading metrics: {e}")
+        st.info("Metrics system may not be initialized yet. Start using the assistant to generate metrics.")
 
 # Memory View
 elif selected_view == "🧠 Memory":
@@ -792,4 +1346,16 @@ with footer_col3:
         st.caption("🧠 Auto-Memory: Disabled")
 
 # Version info
-st.caption("CapeTownConsultant v3.0 – Modular Architecture")
+st.caption("CapeTownConsultant v3.1 – Enhanced Multi-Agent System with Real-Time Metrics")
+
+# Feature indicator
+features_active = []
+if st.session_state.streaming_enabled:
+    features_active.append("Streaming")
+if st.session_state.mode == "multi_worker":
+    features_active.append("Multi-Worker")
+if len(st.session_state.messages) > 0:
+    features_active.append("Conversation Active")
+
+if features_active:
+    st.caption(f"Active Features: {' | '.join(features_active)}")

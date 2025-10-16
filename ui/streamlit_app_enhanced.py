@@ -274,36 +274,134 @@ if selected_view == "💬 Chat":
                 chunks = []
 
                 try:
+                    # Phase 2: Enhanced streaming with activity & controls
+                    cancel_key = f"cancel_{st.session_state.total_queries}"
+                    st.session_state[cancel_key] = False
+
+                    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1,1,2])
+                    with ctrl_col1:
+                        if st.button("⏹️ Stop", key=f"stop_{st.session_state.total_queries}"):
+                            st.session_state[cancel_key] = True
+                    with ctrl_col2:
+                        ttft_placeholder = st.empty()
+                    with ctrl_col3:
+                        copy_placeholder = st.empty()
+
+                    response_placeholder = st.empty()
+                    activity_placeholder = st.container()
+                    citations_placeholder = st.container()
+
+                    chunks = []
+                    content_chunks: List[str] = []
+                    tool_state: Dict[str, str] = {}
+                    tools_running = False
+                    first_token_time = None
+
+                    def render_activity():
+                        if not tool_state:
+                            return
+                        items = []
+                        for name, status in tool_state.items():
+                            icon = "⏳" if status == "running" else "✅"
+                            items.append(f"<span class='tool-indicator'>{icon} {name}</span>")
+                        activity_placeholder.markdown(
+                            f"<div class='progress-container'><strong>Tool activity:</strong><br>{' '.join(items)}</div>",
+                            unsafe_allow_html=True
+                        )
+
+                    def render_content():
+                        response_placeholder.markdown(
+                            f"<div class='{'streaming' if st.session_state.show_progress else ''}'>{''.join(content_chunks)}</div>",
+                            unsafe_allow_html=True
+                        )
+
+                    def parse_and_render_citations(final_text: str) -> str:
+                        # Extract citations section and render as links
+                        splitter = "\n\n---\n\n**Sources:**\n"
+                        if splitter not in final_text:
+                            return final_text
+                        body, cites = final_text.split(splitter, 1)
+                        links = []
+                        for line in cites.splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            # Expect format: [n] url
+                            parts = line.split('] ')
+                            if len(parts) == 2 and parts[1].startswith('http'):
+                                url = parts[1]
+                                links.append(url)
+                        if links:
+                            # Render citations bar
+                            items = "".join([f"<li><a href='{u}' target='_blank' rel='noopener noreferrer'>{u}</a></li>" for u in links])
+                            citations_placeholder.markdown(
+                                f"<div class='info-card'><strong>Sources</strong><ul>{items}</ul></div>",
+                                unsafe_allow_html=True
+                            )
+                        return body
+
+                    start_time = datetime.now()
+
                     async def stream_response():
+                        global first_token_time, tools_running
                         async for chunk in st.session_state.assistant.chat_stream(
                                 prompt,
                                 user_id=st.session_state.user_id
                         ):
-                            chunks.append(chunk)
-                            full = "".join(chunks)
+                            if st.session_state.get(cancel_key):
+                                break
 
-                            # Update display with streaming content
-                            if st.session_state.show_progress:
-                                # Show progress indicators
-                                response_placeholder.markdown(
-                                    f'<div class="streaming">{full}</div>',
+                            if first_token_time is None:
+                                first_token_time = datetime.now()
+                                ttft = (first_token_time - start_time).total_seconds()
+                                ttft_placeholder.caption(f"TTFT: {ttft:.2f}s")
+
+                            chunks.append(chunk)
+
+                            # Parse activity vs content
+                            if chunk.startswith("🔧 "):
+                                # Tools starting
+                                tools_running = True
+                                # Parse tool names after colon
+                                try:
+                                    names_part = chunk.split(":", 1)[1]
+                                    for name in [n.strip() for n in names_part.split(',') if n.strip()]:
+                                        tool_state[name] = "running"
+                                except Exception:
+                                    pass
+                                render_activity()
+                                continue
+                            if chunk.startswith("✅ "):
+                                # Mark all tools complete
+                                for k in list(tool_state.keys()):
+                                    tool_state[k] = "done"
+                                tools_running = False
+                                render_activity()
+                                continue
+                            if chunk.startswith("🤔"):
+                                # Thinking line -> render as subtle status
+                                activity_placeholder.markdown(
+                                    f"<div class='progress-container streaming'>{chunk}</div>",
                                     unsafe_allow_html=True
                                 )
-                            else:
-                                # Show only final content parts
-                                if not chunk.startswith(('🤔', '🔧', '✅')):
-                                    response_placeholder.markdown(full)
+                                continue
 
+                            # Regular content
+                            content_chunks.append(chunk)
+                            render_content()
 
                     asyncio.run(stream_response())
 
                     # Final display without animation
-                    full_response = "".join(chunks)
-                    response_placeholder.markdown(full_response)
+                    full_response = "".join(content_chunks) if content_chunks else "".join(chunks)
+                    # Extract and show citations separately
+                    cleaned = parse_and_render_citations(full_response)
+                    response_placeholder.markdown(cleaned or full_response)
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": full_response
+                        "content": cleaned or full_response
                     })
+                    copy_placeholder.button("📋 Copy answer", on_click=lambda: st.session_state.update({"_copy": cleaned or full_response}))
 
                     # Auto-refresh costs if enabled
                     if Config.ENABLE_COST_TRACKING:
@@ -431,7 +529,44 @@ elif selected_view == "📊 Performance":
     if CACHE_WARMER_AVAILABLE:
         st.divider()
         st.subheader("🗄️ Cache Statistics")
-        st.info("Cache warmer integration available - statistics would appear here in production")
+        try:
+            # Lazy-init smart embedding service in session for stats only
+            if 'smart_embed' not in st.session_state:
+                st.session_state.smart_embed = SmartEmbeddingService(api_key=Config.OPENAI_API_KEY)
+            smart = st.session_state.smart_embed
+            stats = smart.get_cache_stats()
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Total Unique Queries", stats.get("total_unique_queries", 0))
+            with c2:
+                st.metric("Total Accesses", stats.get("total_accesses", 0))
+            with c3:
+                st.markdown("Top Queries:")
+                top_list = stats.get("top_10_queries", [])[:5]
+                if top_list:
+                    for i, q in enumerate(top_list, 1):
+                        st.caption(f"{i}. {q}")
+                else:
+                    st.caption("No data yet")
+
+            colA, colB = st.columns(2)
+            with colA:
+                if st.button("🔄 Refresh Cache Stats"):
+                    st.rerun()
+            with colB:
+                warm_now = st.text_input("Warm specific queries (comma-separated)", key="warm_inputs")
+                if st.button("🔥 Warm Now"):
+                    texts = [t.strip() for t in warm_now.split(',') if t.strip()]
+                    if texts:
+                        # Run an async warm in a safe, minimal way
+                        async def do_warm():
+                            await smart.cache_warmer.warm_cache(texts=texts, user_id=st.session_state.user_id)
+                        asyncio.run(do_warm())
+                        st.success("Warming queued/completed")
+                        st.rerun()
+        except Exception as e:
+            st.info(f"Cache stats unavailable: {e}")
 
 # ============================================================================
 # Footer

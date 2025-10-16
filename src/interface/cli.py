@@ -1,6 +1,6 @@
 """
 CLI interface
-Command-line interface for the assistant
+Command-line interface for the assistant with orchestration support
 """
 
 import asyncio
@@ -10,19 +10,21 @@ from src.config.settings import Config
 
 async def run_cli():
     """Run the CLI interface"""
-    print("🧠 Autonomous Assistant v3.0 (Enhanced)")
+    print("🧠 Autonomous Assistant v3.1 (Multi-Agent Orchestration)")
     print("=" * 70)
-    print("✅ Fixes: #1,#2,#3,#4,#6,#7,#8,#9,#10")
+    print("✅ Features: Multi-agent orchestration, Domain specialists")
     print("=" * 70)
-    print("\nCommands: exit | clear | config | costs\n")
+    print("\nCommands: exit | clear | config | costs | mode | workers\n")
 
     user_id = "cli_user"
+    orchestration_enabled = True
 
-    async with AutonomousAssistant() as assistant:
+    async with AutonomousAssistant(enable_orchestration=orchestration_enabled) as assistant:
         try:
             while True:
                 try:
-                    user_input = input("\n🧑 You: ").strip()
+                    mode_indicator = "🎭" if orchestration_enabled else "🤖"
+                    user_input = input(f"\n{mode_indicator} You: ").strip()
 
                     if not user_input:
                         continue
@@ -51,6 +53,22 @@ async def run_cli():
                         print(f"  SerpAPI: {'✅' if status['serpapi'] else '❌'}")
                         print(f"  Google: {'✅' if status['google_search'] else '❌'}")
                         print(f"  Perplexity: {'✅' if status['perplexity'] else '❌'}")
+                        continue
+
+                    if user_input.lower() == 'mode':
+                        orchestration_enabled = not orchestration_enabled
+                        assistant.toggle_orchestration(orchestration_enabled)
+                        mode_name = "ORCHESTRATION" if orchestration_enabled else "TRADITIONAL"
+                        print(f"✅ Switched to {mode_name} mode")
+                        continue
+
+                    if user_input.lower() == 'workers':
+                        from src.workers.templates import WorkerType, WorkerTemplates
+                        print("\n👥 Available Specialists:")
+                        for wt in WorkerType:
+                            template = WorkerTemplates.get_template(wt)
+                            if template:
+                                print(f"  • {wt.value.replace('_', ' ').title()} (Priority: {template.get('priority', 3)})")
                         continue
 
                     print("\n🤔 Processing...\n")
