@@ -36,8 +36,8 @@ class ToolSchemas:
             "optional": {}
         },
         "profile_read": {
-            "required": ["keys"],
-            "optional": {}
+            "required": [],
+            "optional": {"keys": list}
         },
         "profile_write": {
             "required": ["data"],
@@ -160,11 +160,10 @@ class ToolSchemas:
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "id": {"type": "string"},
                                         "text": {"type": "string"},
-                                        "metadata": {"type": "object"}
+                                        "meta": {"type": "object"}
                                     },
-                                    "required": ["id", "text"]
+                                    "required": ["text"]
                                 }
                             }
                         },
@@ -182,11 +181,11 @@ class ToolSchemas:
                         "properties": {
                             "keys": {
                                 "type": "array",
-                                "description": "List of profile keys to read",
+                                "description": "Optional list of keys. Omit to get full profile",
                                 "items": {"type": "string"}
                             }
                         },
-                        "required": ["keys"]
+                        "required": []
                     }
                 }
             },
