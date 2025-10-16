@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 import sys
 from loguru import logger as _loguru_logger
-
+from src.services.embeddings import EmbeddingService
 load_dotenv(find_dotenv())
 
 # External dependencies
@@ -360,86 +360,6 @@ class PersistentEmbeddingCache:
 # EMBEDDING SERVICE (Fix #9)
 # ============================================================================
 
-class EmbeddingService:
-    def __init__(self, api_key: str = None, cost_tracker: CostTracker = None):
-        self.api_key = api_key or Config.OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
-        self.cache = PersistentEmbeddingCache()
-        self.cost_tracker = cost_tracker
-        self._rate_limiter = None
-
-    @property
-    def rate_limiter(self):
-        if self._rate_limiter is None:
-            self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
-        return self._rate_limiter
-
-    @retry(stop=stop_after_attempt(Config.MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=10))
-    async def embed(self, text: str, user_id: str = "default") -> List[float]:
-        if not self.client:
-            raise ValueError("OpenAI API key not configured")
-
-        cached = await self.cache.get(text)
-        if cached is not None:
-            return cached
-
-        if self.cost_tracker and not await self.cost_tracker.check_budget(user_id, "embedding", len(text)):
-            raise ValueError("Daily budget limit exceeded")
-
-        async with self.rate_limiter:
-            try:
-                response = await self.client.embeddings.create(
-                    model=Config.EMBEDDING_MODEL,
-                    input=text[:8000]
-                )
-                embedding = response.data[0].embedding
-                await self.cache.set(text, embedding)
-                if self.cost_tracker:
-                    await self.cost_tracker.record_cost(user_id, "embedding", len(text))
-                return embedding
-            except Exception as e:
-                raise Exception(f"Embedding generation failed: {str(e)}")
-
-    async def embed_batch(self, texts: List[str], user_id: str = "default") -> List[List[float]]:
-        if not self.client:
-            raise ValueError("OpenAI API key not configured")
-
-        results = []
-        to_embed = []
-        indices = []
-
-        for i, text in enumerate(texts):
-            cached = await self.cache.get(text)
-            if cached is not None:
-                results.append(cached)
-            else:
-                to_embed.append(text[:8000])
-                indices.append(i)
-                results.append(None)
-
-        if to_embed:
-            total_chars = sum(len(t) for t in to_embed)
-            if self.cost_tracker and not await self.cost_tracker.check_budget(user_id, "embedding", total_chars):
-                raise ValueError("Daily budget limit exceeded")
-
-            async with self.rate_limiter:
-                try:
-                    response = await self.client.embeddings.create(
-                        model=Config.EMBEDDING_MODEL,
-                        input=to_embed
-                    )
-                    for idx, embedding_obj in zip(indices, response.data):
-                        embedding = embedding_obj.embedding
-                        results[idx] = embedding
-                        await self.cache.set(texts[idx], embedding)
-
-                    if self.cost_tracker:
-                        await self.cost_tracker.record_cost(user_id, "embedding", total_chars)
-
-                except Exception as e:
-                    raise Exception(f"Batch embedding failed: {str(e)}")
-
-        return results
 
 
 # ============================================================================

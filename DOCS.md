@@ -304,3 +304,16 @@ See `requirements.txt`. Core libraries include `openai`, `httpx`, `tenacity`, `a
 - Logging via `loguru` to console and `./cache/logs/app.log`.
 - All external operations respect `Config.MAX_RETRIES` and `Config.TIMEOUT_SECONDS`.
 - Conversations are pruned/summarized to respect `Config.MAX_CONVERSATION_HISTORY`.
+
+
+# Create a backup branch
+git checkout -b phase1-bug-fixes
+git add .
+git commit -m "Backup before Phase 1 fixes"
+
+# Create backup directory
+mkdir -p backups/phase1
+cp src/tools/schemas.py backups/phase1/
+cp src/tools/executor.py backups/phase1/
+cp src/services/embeddings.py backups/phase1/
+cp src/services/search/google.py backups/phase1/

@@ -3,8 +3,8 @@ Embedding service
 Generate and cache embeddings using OpenAI
 """
 
-import asyncio
 from typing import List, Optional
+import asyncio
 import aiolimiter
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -27,19 +27,15 @@ class EmbeddingService:
 
     @property
     def rate_limiter(self):
-        """Get or create rate limiter for current event loop - thread-safe"""
+        """Get or create rate limiter for current event loop"""
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop, create new limiter without loop reference
-            if self._rate_limiter is None:
-                self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
+            self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
             self._rate_limiter_loop = None
             return self._rate_limiter
-
-        # Check if we're in a different event loop
-        if self._rate_limiter_loop is not current_loop:
-            # Create new rate limiter for this event loop
+        
+        if not hasattr(self, '_rate_limiter_loop') or self._rate_limiter_loop is not current_loop:
             self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
             self._rate_limiter_loop = current_loop
         

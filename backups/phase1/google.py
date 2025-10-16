@@ -2,7 +2,6 @@
 Google Custom Search implementation
 """
 
-import asyncio
 import aiolimiter
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -20,26 +19,13 @@ class GoogleSearch(BaseSearchEngine):
         self.api_key = Config.GOOGLE_SEARCH_API_KEY
         self.engine_id = Config.GOOGLE_SEARCH_ENGINE_ID
         self._rate_limiter = None
-        self._rate_limiter_loop = None
+        self._rate_limiter_loop = None  # Add this
 
     @property
     def rate_limiter(self):
-        """Get or create rate limiter for current event loop - thread-safe"""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create new limiter without loop reference
-            if self._rate_limiter is None:
-                self._rate_limiter = aiolimiter.AsyncLimiter(Config.SERPAPI_RPM, 60)
-            self._rate_limiter_loop = None
-            return self._rate_limiter
-
-        # Check if we're in a different event loop
-        if self._rate_limiter_loop is not current_loop:
-            # Create new rate limiter for this event loop
+        """Lazy-load rate limiter"""
+        if self._rate_limiter is None:
             self._rate_limiter = aiolimiter.AsyncLimiter(Config.SERPAPI_RPM, 60)
-            self._rate_limiter_loop = current_loop
-
         return self._rate_limiter
 
     @retry(
@@ -56,7 +42,7 @@ class GoogleSearch(BaseSearchEngine):
         if not self.api_key or not self.engine_id:
             return ToolResult(
                 success=False,
-                error="Google Search API not configured. Set GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID in .env",
+                error="Google Search API not configured",
                 source="google"
             )
 
@@ -77,7 +63,7 @@ class GoogleSearch(BaseSearchEngine):
                     "key": self.api_key,
                     "cx": self.engine_id,
                     "q": query,
-                    "num": min(num_results, 10),  # Google API max is 10
+                    "num": num_results,
                 }
 
                 response = await self.http_client.get(url, params=params)

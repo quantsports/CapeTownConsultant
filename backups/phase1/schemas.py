@@ -36,7 +36,7 @@ class ToolSchemas:
             "optional": {}
         },
         "profile_read": {
-            "required": [],  # ✅ FIXED: Made keys optional to allow reading full profile
+            "required": [],
             "optional": {"keys": list}
         },
         "profile_write": {
@@ -150,26 +150,20 @@ class ToolSchemas:
                 "type": "function",
                 "function": {
                     "name": "memory_upsert",
-                    "description": """Store information in vector memory for future recall. System auto-generates IDs.""",
+                    "description": """Store information in vector memory for future recall.""",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "items": {
                                 "type": "array",
-                                "description": "List of items to store. Each needs 'text' field, optional 'meta' for metadata.",
+                                "description": "List of items to store",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "text": {
-                                            "type": "string",
-                                            "description": "The content to store"
-                                        },
-                                        "meta": {
-                                            "type": "object",
-                                            "description": "Optional metadata (e.g., category, importance)"
-                                        }
+                                        "text": {"type": "string"},
+                                        "meta": {"type": "object"}
                                     },
-                                    "required": ["text"]  # ✅ FIXED: Only text is required, ID auto-generated
+                                    "required": ["text"]
                                 }
                             }
                         },
@@ -181,17 +175,17 @@ class ToolSchemas:
                 "type": "function",
                 "function": {
                     "name": "profile_read",
-                    "description": """Read user profile data. Omit 'keys' parameter to get full profile.""",
+                    "description": """Read user profile data (preferences, history, settings).""",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "keys": {
                                 "type": "array",
-                                "description": "Optional: Specific keys to read. If omitted, returns entire profile.",
+                                "description": "Optional list of keys. Omit to get full profile",
                                 "items": {"type": "string"}
                             }
                         },
-                        "required": []  # ✅ FIXED: No required params - can read full profile
+                        "required": []
                     }
                 }
             },
@@ -199,7 +193,7 @@ class ToolSchemas:
                 "type": "function",
                 "function": {
                     "name": "profile_write",
-                    "description": """Write/update user profile data (preferences, history, settings).""",
+                    "description": """Write user profile data (preferences, history, settings).""",
                     "parameters": {
                         "type": "object",
                         "properties": {

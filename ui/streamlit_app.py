@@ -245,12 +245,22 @@ def init_session_state():
     # Initialize assistant if not done
     if not st.session_state.assistant_initialized:
         try:
-            cost_tracker = CostTracker()
-            st.session_state.cost_tracker = cost_tracker
-            st.session_state.assistant = asyncio.run(
-                AutonomousAssistant(cost_tracker=cost_tracker).__aenter__()
-            )
-            st.session_state.assistant_initialized = True
+            # Avoid nested event loops
+            if not hasattr(st.session_state, '_assistant_init_attempted'):
+                st.session_state._assistant_init_attempted = True
+                cost_tracker = CostTracker()
+                st.session_state.cost_tracker = cost_tracker
+                
+                # Use new_event_loop to avoid conflicts
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    st.session_state.assistant = loop.run_until_complete(
+                        AutonomousAssistant(cost_tracker=cost_tracker).__aenter__()
+                    )
+                    st.session_state.assistant_initialized = True
+                finally:
+                    loop.close()
         except Exception as e:
             st.session_state.assistant = None
             st.session_state.assistant_initialized = False

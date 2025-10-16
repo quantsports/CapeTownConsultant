@@ -62,7 +62,7 @@ class ToolExecutor:
             tool_name: str,
             arguments: Dict
     ) -> Tuple[bool, Optional[str]]:
-        """Enhanced validation with schemas and deep item validation"""
+        """Enhanced validation with schemas"""
         try:
             if tool_name not in ToolSchemas.SCHEMAS:
                 return False, f"Unknown tool: {tool_name}"
@@ -74,34 +74,12 @@ class ToolExecutor:
                 if param not in arguments:
                     return False, f"Missing required parameter: {param}"
 
-                # ✅ ENHANCED: Deep validation for memory_upsert items
-                if param == "items" and tool_name == "memory_upsert":
-                    if not isinstance(arguments[param], list):
-                        return False, f"Parameter 'items' must be a list"
-
-                    if len(arguments[param]) == 0:
-                        return False, f"Parameter 'items' cannot be empty"
-
-                    # Validate each item structure
-                    for i, item in enumerate(arguments[param]):
-                        if not isinstance(item, dict):
-                            return False, f"Item {i} must be a dictionary"
-                        if "text" not in item:
-                            return False, f"Item {i} missing required 'text' field"
-                        if not isinstance(item["text"], str):
-                            return False, f"Item {i} 'text' field must be a string"
-                        if item["text"].strip() == "":
-                            return False, f"Item {i} 'text' field cannot be empty"
-                        # Validate optional 'meta' field
-                        if "meta" in item and not isinstance(item["meta"], dict):
-                            return False, f"Item {i} 'meta' field must be a dictionary"
-
-                # Type validation for other list parameters
-                elif param == "keys" and not isinstance(arguments[param], list):
+                # Type validation for specific parameters
+                if param == "items" and not isinstance(arguments[param], list):
+                    return False, f"Parameter 'items' must be a list"
+                if param == "keys" and not isinstance(arguments[param], list):
                     return False, f"Parameter 'keys' must be a list"
-
-                # Type validation for dict parameters
-                elif param == "data" and not isinstance(arguments[param], dict):
+                if param == "data" and not isinstance(arguments[param], dict):
                     return False, f"Parameter 'data' must be a dict"
 
             # Check optional parameters
@@ -109,10 +87,21 @@ class ToolExecutor:
                 if param in arguments and not isinstance(arguments[param], expected_type):
                     return False, f"Parameter '{param}' must be of type {expected_type.__name__}"
 
+            # Deep validation for items parameter
+            if "items" in arguments:
+                if not isinstance(arguments["items"], list):
+                    return False, f"Parameter 'items' must be a list"
+                # Validate each item has required 'text' field
+                for i, item in enumerate(arguments["items"]):
+                    if not isinstance(item, dict):
+                        return False, f"Item {i} must be a dictionary"
+                    if "text" not in item:
+                        return False, f"Item {i} missing required 'text' field"
+
             return True, None
 
         except Exception as e:
-            return False, f"Validation error: {str(e)}"
+            return False, str(e)
 
     async def execute(
             self,
@@ -124,8 +113,7 @@ class ToolExecutor:
         # Validate tool call
         is_valid, error = self.validate_tool_call(tool_name, arguments)
         if not is_valid:
-            logger.error("tool_validation_failed", tool=tool_name, error=error)
-            return ToolResult(success=False, error=f"Validation failed: {error}")
+            return ToolResult(success=False, error=error)
 
         try:
             # Execute appropriate tool
@@ -175,14 +163,11 @@ class ToolExecutor:
                 )
 
             elif tool_name == ToolType.PROFILE_READ.value:
-                # ✅ FIXED: Handle optional keys parameter
-                keys = arguments.get("keys")  # Can be None
-                data = await self.profile_manager.read(user_id, keys)
-                return ToolResult(
-                    success=True,
-                    data=data,
-                    source="profile_manager"
+                data = await self.profile_manager.read(
+                    user_id,
+                    arguments.get("keys")
                 )
+                return ToolResult(success=True, data=data)
 
             elif tool_name == ToolType.PROFILE_WRITE.value:
                 success = await self.profile_manager.write(
@@ -191,8 +176,7 @@ class ToolExecutor:
                 )
                 return ToolResult(
                     success=success,
-                    data={"updated": list(arguments.get("data", {}).keys())},
-                    source="profile_manager"
+                    data={"updated": list(arguments.get("data", {}).keys())}
                 )
 
             else:
@@ -202,7 +186,7 @@ class ToolExecutor:
                 )
 
         except Exception as e:
-            logger.error("tool_execution_failed", tool=tool_name, error=str(e), user_id=user_id)
+            logger.error("tool_execution_failed", tool=tool_name, error=str(e))
             return ToolResult(
                 success=False,
                 error=f"Tool execution failed: {str(e)}"
