@@ -1,0 +1,41 @@
+[tool.black]
+# line-length = 88  # optional; 88 is default
+target-version = ["py39"]  # or ["py39", "py310", "py311", "py312", "py313"]
+exclude = '''
+/(
+    migrations
+  | .*/generated/
+  | .*/static/
+  | .*/templates/
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip_glob = [
+    "*/migrations/*",
+    "*/.venv/*",
+    "*/build/*",
+    "*/dist/*",
+]
+
+[tool.mypy]
+python_version = "3.9"  # match your lowest supported runtime
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+follow_imports = "normal"
+ignore_missing_imports = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["pinecone.*", "streamlit.*", "loguru.*"]
+ignore_missing_imports = true

@@ -2,7 +2,7 @@
 openai
 python-dotenv
 requests
-
+httpx
 # Optional dependencies
 pydantic
 
@@ -40,13 +40,17 @@ asyncio
 # Data processing
 # beautifulsoup4
 # lxml
-
+structlog
 
 # Wikipedia
 wikipedia
-
+wikipedia-api
 # Progress bars
 tqdm
 
 # Web UI
 streamlit
+
+
+# Core Dependencies
+

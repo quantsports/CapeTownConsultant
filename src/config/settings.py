@@ -1,6 +1,6 @@
 """
-Configuration management for the assistant
-Centralized settings and environment variable handling
+Application configuration and settings
+Centralized configuration management with environment variable support
 """
 
 import os
@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Dict, Any
 from dotenv import load_dotenv, find_dotenv
 
-# Load environment variables at module import
+# Load environment variables
 load_dotenv(find_dotenv())
 
 
+
 class Config:
-    """Centralized configuration for the assistant"""
+    """Application configuration"""
 
     # ========================================================================
     # API Keys
@@ -28,33 +29,29 @@ class Config:
     PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
     # ========================================================================
-    # Pinecone Configuration
-    # ========================================================================
-
-    PINECONE_INDEX = os.getenv("PINECONE_INDEX", "assistant-memory")
-    PINECONE_DIMENSION = 1536
-    PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
-
-    # ========================================================================
     # Model Configuration
     # ========================================================================
 
+    CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-2024-08-06")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o")
-    SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o-mini")
+    SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o-mini-2024-07-18")
 
     # ========================================================================
-    # API Settings
+    # Pinecone Configuration
     # ========================================================================
 
-    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+    PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1-aws")
+    PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "research-assistant")
+    PINECONE_INDEX = os.getenv("PINECONE_INDEX", "research-assistant")
+    PINECONE_DIMENSION = int(os.getenv("PINECONE_DIMENSION", "1536"))
+
+    # ========================================================================
+    # System Limits
+    # ========================================================================
+
+    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
     TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "30"))
-
-    # Conversation history limits
     MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "20"))
-    MAX_HISTORY_MESSAGES = MAX_CONVERSATION_HISTORY  # Alias for backward compatibility
-
-    CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
     MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
 
     # ========================================================================
@@ -77,7 +74,7 @@ class Config:
     # ========================================================================
 
     ENABLE_COST_TRACKING = os.getenv("ENABLE_COST_TRACKING", "True").lower() == "true"
-    DAILY_BUDGET_LIMIT = float(os.getenv("DAILY_BUDGET_LIMIT", "5.0"))
+    DAILY_BUDGET_LIMIT = float(os.getenv("DAILY_BUDGET_LIMIT", "10.0"))
 
     # ========================================================================
     # Directory Paths
@@ -103,8 +100,19 @@ class Config:
     # ========================================================================
 
     ENABLE_STREAMING = os.getenv("ENABLE_STREAMING", "True").lower() == "true"
-    ENABLE_ORCHESTRATION = os.getenv("ENABLE_ORCHESTRATION", "False").lower() == "true"
+    ENABLE_ORCHESTRATION = os.getenv("ENABLE_ORCHESTRATION", "True").lower() == "true"
     ENABLE_CONCURRENT_TOOLS = os.getenv("ENABLE_CONCURRENT_TOOLS", "True").lower() == "true"
+
+    # ========================================================================
+    # Research-Specific Settings
+    # ========================================================================
+
+    ENABLE_ACADEMIC_SEARCH = os.getenv("ENABLE_ACADEMIC_SEARCH", "True").lower() == "true"
+    MAX_SOURCES_PER_WORKER = int(os.getenv("MAX_SOURCES_PER_WORKER", "10"))
+    MIN_SOURCE_CREDIBILITY = float(os.getenv("MIN_SOURCE_CREDIBILITY", "0.6"))
+    ENABLE_FACT_CHECKING = os.getenv("ENABLE_FACT_CHECKING", "True").lower() == "true"
+    DEFAULT_RESEARCH_DEPTH = os.getenv("DEFAULT_RESEARCH_DEPTH", "comprehensive")
+    MAX_WORKERS = int(os.getenv("MAX_WORKERS", "5"))
 
     # ========================================================================
     # Validation Methods
@@ -193,20 +201,6 @@ class Config:
                 "profiles": str(cls.PROFILE_DIR),
             }
         }
-
-    @classmethod
-    def get_attribute_safely(cls, attr_name: str, default: Any = None) -> Any:
-        """
-        Safely get a config attribute with fallback
-
-        Args:
-            attr_name: Attribute name to retrieve
-            default: Default value if attribute doesn't exist
-
-        Returns:
-            Attribute value or default
-        """
-        return getattr(cls, attr_name, default)
 
 
 # ============================================================================

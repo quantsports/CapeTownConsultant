@@ -1,6 +1,6 @@
 """
 Autonomous Agent with Multi-Agent Orchestration
-Fixed to properly integrate orchestration system
+FIXED: Critical OpenAI API tool_calls compatibility issues
 """
 
 import asyncio
@@ -206,7 +206,7 @@ class AutonomousAgent:
                 )
                 return response
             except Exception as e:
-                logger.error("orchestration_failed", error=str(e))
+                logger.error("orchestration_failed", error=str(e), user_id=user_id)
                 # Fall back to traditional mode
                 logger.info("fallback_to_traditional", reason="orchestration_error")
 
@@ -263,35 +263,105 @@ Always cite sources [1], [2]. Store important user info automatically."""
 
                     assistant_message = response.choices[0].message
 
-                    # Handle tool calls
+                    # CRITICAL FIX: Handle tool calls with proper OpenAI API format
                     if assistant_message.tool_calls:
-                        self.conversation_history.append({
-                            "role": "assistant",
-                            "content": assistant_message.content,
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.function.name,
-                                        "arguments": tc.function.arguments
-                                    }
+                        # Build tool_calls in correct format
+                        tool_calls_data = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
                                 }
-                                for tc in assistant_message.tool_calls
-                            ]
-                        })
+                            }
+                            for tc in assistant_message.tool_calls
+                        ]
 
-                        # Execute tools
-                        tool_messages = await self._execute_tools_concurrently(
-                            assistant_message.tool_calls,
-                            user_id
-                        )
+                        # CRITICAL FIX: OpenAI API requires proper handling of content field
+                        # When tool_calls is present, content should be:
+                        # 1. Omitted entirely (preferred), OR
+                        # 2. Set to None, OR
+                        # 3. Have actual content (if model generated text alongside tool calls)
+                        # We should NEVER use empty string ""
+                        assistant_msg = {
+                            "role": "assistant",
+                            "tool_calls": tool_calls_data
+                        }
 
-                        self.conversation_history.extend(tool_messages)
-                        continue
+                        # Only add content if it exists and has actual text
+                        if assistant_message.content and assistant_message.content.strip():
+                            assistant_msg["content"] = assistant_message.content
+                        # FIXED: Don't add content field at all if empty
+                        # This is the safest approach for OpenAI API
+
+                        self.conversation_history.append(assistant_msg)
+
+                        # Execute each tool call
+                        for tool_call in assistant_message.tool_calls:
+                            function_name = tool_call.function.name
+                            try:
+                                function_args = json.loads(tool_call.function.arguments)
+                            except json.JSONDecodeError as e:
+                                logger.warning("invalid_tool_arguments",
+                                              tool=function_name,
+                                              error=str(e),
+                                              args_preview=tool_call.function.arguments[:100])
+
+                                self.conversation_history.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": function_name,
+                                    "content": json.dumps({
+                                        "error": f"Invalid JSON arguments - {str(e)}",
+                                        "raw_args": tool_call.function.arguments[:200]
+                                    })
+                                })
+                                continue
+
+                            try:
+                                result = await self.tool_executor.execute(
+                                    function_name,
+                                    function_args,
+                                    user_id
+                                )
+                            except Exception as e:
+                                logger.error("tool_execution_error",
+                                            tool=function_name,
+                                            error=str(e),
+                                            user_id=user_id)
+                                self.conversation_history.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": function_name,
+                                    "content": json.dumps({
+                                        "error": f"Tool execution failed: {str(e)}"
+                                    })
+                                })
+                                continue
+
+                            if result.citations:
+                                self.citation_manager.add_citations(result.citations)
+
+                            if result.success:
+                                data_str = json.dumps(result.data, indent=2, default=str)
+                                if len(data_str) > 2000:
+                                    data_str = data_str[:2000] + "\n... (truncated)"
+                                tool_response = f"Success from {result.source or function_name}:\n{data_str}"
+                            else:
+                                tool_response = f"Error: {result.error}"
+
+                            self.conversation_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": function_name,
+                                "content": tool_response
+                            })
+
+                        continue  # Continue to next iteration for final response
 
                     else:
-                        # Final answer
+                        # Final answer (no tool calls)
                         final_answer = assistant_message.content or "I couldn't generate a response."
                         final_answer += self.citation_manager.format_citations()
 
@@ -310,7 +380,7 @@ Always cite sources [1], [2]. Store important user info automatically."""
                         return final_answer
 
                 except Exception as e:
-                    logger.error("chat_failed", error=str(e))
+                    logger.error("chat_failed", error=str(e), user_id=user_id)
                     return f"❌ Error: {str(e)}"
 
         return "⚠️ Max iterations reached. Try rephrasing."
@@ -322,7 +392,10 @@ Always cite sources [1], [2]. Store important user info automatically."""
         for tc in tool_calls:
             try:
                 args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning("concurrent_tool_args_parse_error",
+                              tool=tc.function.name,
+                              error=str(e))
                 args = {}
 
             tool_infos.append({
@@ -342,15 +415,15 @@ Always cite sources [1], [2]. Store important user info automatically."""
         tool_messages = []
         for info, result in zip(tool_infos, results):
             if isinstance(result, Exception):
-                tool_response = f"Error: {str(result)}"
+                tool_response = json.dumps({"error": str(result)})
             else:
                 if result.success:
-                    data_str = json.dumps(result.data, indent=2)
+                    data_str = json.dumps(result.data, indent=2, default=str)
                     if len(data_str) > 2000:
                         data_str = data_str[:2000] + "\n... (truncated)"
                     tool_response = f"Success from {result.source or info['name']}:\n{data_str}"
                 else:
-                    tool_response = f"Error: {result.error}"
+                    tool_response = json.dumps({"error": result.error or "Unknown error"})
 
             tool_messages.append({
                 "role": "tool",
@@ -368,10 +441,14 @@ Always cite sources [1], [2]. Store important user info automatically."""
             system_msg = self.conversation_history[0]
             recent = self.conversation_history[-(Config.MAX_CONVERSATION_HISTORY - 1):]
             self.conversation_history = [system_msg] + recent
+            logger.debug("conversation_history_truncated",
+                        kept_messages=len(self.conversation_history),
+                        user_id=user_id)
 
     async def _extract_memories(self, recent_messages: List[Dict], user_id: str):
         """Extract and store important information from conversation"""
         # Simplified memory extraction
+        # This is a placeholder for more sophisticated memory extraction
         pass
 
     def set_progress_callback(self, callback):
@@ -382,13 +459,16 @@ Always cite sources [1], [2]. Store important user info automatically."""
         """Clear conversation history"""
         self.conversation_history = []
         self.citation_manager.clear()
+        logger.debug("conversation_history_cleared")
 
     async def chat_stream(self, user_message: str, user_id: str = "default") -> AsyncIterator[str]:
         """
         Streaming version - delegates to orchestrator if needed
+
+        Note: Orchestration doesn't support streaming yet
         """
         if self._should_use_orchestration(user_message):
-            # Orchestration doesn't support streaming yet, return complete response
+            # Orchestration doesn't support streaming, return complete response
             result = await self.chat(user_message, user_id)
             yield result
         else:

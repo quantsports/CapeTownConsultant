@@ -1,6 +1,7 @@
 """
 Base worker class and implementations
 Workers are domain-specific agents that execute specialized tasks
+FIXED: Critical OpenAI API compatibility and performance issues
 """
 
 import asyncio
@@ -37,6 +38,12 @@ class BaseWorker:
     Base class for domain-specific workers
     Each worker is an autonomous agent with specialized expertise
     """
+
+    # Pre-compiled regex patterns for performance (class-level)
+    _CONFIDENCE_PATTERN = re.compile(r'confidence[:\s]+([0-9]+\.?[0-9]*)', re.IGNORECASE)
+    _URL_PATTERN = re.compile(r'https?://[^\s)<>"\']+[^\s)<>"\',.]')
+    _NUMBERED_LIST_PATTERN = re.compile(r'^\s*(\d+)\.\s+(.+)$')
+    _BULLET_PATTERN = re.compile(r'^[\s]*[•\-*]\s+(.+?)$')
 
     def __init__(
             self,
@@ -186,7 +193,8 @@ class BaseWorker:
                 metadata={"timestamp": datetime.now().isoformat(), "user_id": user_id}
             )
 
-    def _serialize_tool_result(self, tool_result) -> str:
+    @staticmethod
+    def _serialize_tool_result(tool_result) -> str:
         """Safely serialize tool result for LLM consumption"""
         try:
             if tool_result.success:
@@ -258,7 +266,7 @@ Format your response clearly with sections."""
             worker_tools = None
 
         try:
-            # Call LLM with timeout protection
+            # FIXED: Use single timeout wrapper for better control
             response = await asyncio.wait_for(
                 self.client.chat.completions.create(
                     model=Config.CHAT_MODEL,
@@ -266,37 +274,48 @@ Format your response clearly with sections."""
                     tools=worker_tools if worker_tools else None,
                     tool_choice="auto" if worker_tools else None,
                     temperature=0.3,
-                    max_tokens=4000,
-                    timeout=120.0  # OpenAI client timeout
+                    max_tokens=4000
                 ),
-                timeout=150.0  # Overall operation timeout
+                timeout=130.0  # Single timeout for entire operation
             )
         except asyncio.TimeoutError:
             logger.error("worker_llm_timeout",
                         worker_type=self.worker_type.value,
                         user_id=user_id)
-            raise ValueError("LLM request timed out after 150 seconds")
+            raise ValueError(f"LLM request timed out after 130 seconds for {self.worker_type.value}")
 
         # Handle tool calls if present
         assistant_message = response.choices[0].message
 
         if assistant_message.tool_calls:
             # Execute tools and continue conversation
-            messages.append({
-                "role": "assistant",
-                "content": assistant_message.content or "",  # Ensure string
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
+            # Build tool_calls in the correct format
+            tool_calls_data = []
+            for tc in assistant_message.tool_calls:
+                tool_calls_data.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
                     }
-                    for tc in assistant_message.tool_calls
-                ]
-            })
+                })
+
+            # CRITICAL FIX: OpenAI API requires either:
+            # 1. content field omitted entirely when tool_calls present, OR
+            # 2. content set to None (but better to omit)
+            # We should NOT include empty string ""
+            assistant_msg = {
+                "role": "assistant",
+                "tool_calls": tool_calls_data
+            }
+
+            # Only add content if it exists and has actual content
+            if assistant_message.content and assistant_message.content.strip():
+                assistant_msg["content"] = assistant_message.content
+            # FIXED: Don't add content field at all if empty (OpenAI prefers omission)
+
+            messages.append(assistant_msg)
 
             # Execute tool calls
             for tool_call in assistant_message.tool_calls:
@@ -307,22 +326,40 @@ Format your response clearly with sections."""
                     logger.error(
                         "tool_args_parse_error",
                         tool_name=tool_call.function.name,
-                        error=str(e)
+                        args_preview=tool_call.function.arguments[:100],
+                        error=str(e),
+                        worker_type=self.worker_type.value
                     )
                     # Add error message for this tool call
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": tool_call.function.name,
-                        "content": json.dumps({"error": f"Failed to parse arguments: {str(e)}"})
+                        "content": json.dumps({
+                            "error": f"Failed to parse arguments: {str(e)}",
+                            "raw_args": tool_call.function.arguments[:200]
+                        })
                     })
                     continue
 
-                tool_result = await self.tool_executor.execute(
-                    tool_name,
-                    tool_args,
-                    user_id
-                )
+                try:
+                    tool_result = await self.tool_executor.execute(
+                        tool_name,
+                        tool_args,
+                        user_id
+                    )
+                except Exception as e:
+                    logger.error("tool_execution_failed",
+                                tool_name=tool_name,
+                                error=str(e),
+                                worker_type=self.worker_type.value)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": json.dumps({"error": f"Tool execution failed: {str(e)}"})
+                    })
+                    continue
 
                 # Store tool result in context with error handling
                 try:
@@ -337,7 +374,7 @@ Format your response clearly with sections."""
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": tool_name,
-                    "content": self._serialize_tool_result(tool_result)
+                    "content": BaseWorker._serialize_tool_result(tool_result)
                 })
 
             # Get final response with tool results
@@ -347,15 +384,14 @@ Format your response clearly with sections."""
                         model=Config.CHAT_MODEL,
                         messages=messages,
                         temperature=0.3,
-                        max_tokens=4000,
-                        timeout=120.0
+                        max_tokens=4000
                     ),
-                    timeout=150.0
+                    timeout=130.0
                 )
             except asyncio.TimeoutError:
                 logger.error("worker_final_response_timeout",
                             worker_type=self.worker_type.value)
-                raise ValueError("Final LLM request timed out")
+                raise ValueError(f"Final LLM request timed out for {self.worker_type.value}")
 
             final_content = final_response.choices[0].message.content
             return final_content if final_content else ""
@@ -393,6 +429,7 @@ Format your response clearly with sections."""
     def _structure_response(self, response: str) -> Dict[str, Any]:
         """
         Parse and structure the LLM response
+        FIXED: Improved regex performance and edge case handling
 
         Args:
             response: Raw LLM response text
@@ -404,77 +441,23 @@ Format your response clearly with sections."""
         if not response or not isinstance(response, str):
             return self._empty_structured_response()
 
-        # Truncate extremely long responses to prevent regex issues
-        if len(response) > 50000:
+        # FIXED: Truncate extremely long responses to prevent ReDoS
+        max_length = 50000
+        if len(response) > max_length:
             logger.warning("truncating_long_response",
                           worker_type=self.worker_type.value,
-                          original_length=len(response))
-            response = response[:50000]
+                          original_length=len(response),
+                          truncated_to=max_length)
+            response = response[:max_length]
 
         # Extract recommendations with safer line-by-line parsing
-        recommendations = []
-        lines = response.split('\n')
-        current_rec = None
-
-        for line in lines:
-            # Match numbered list items
-            match = re.match(r'^\s*(\d+)\.\s+(.+)$', line)
-            if match:
-                # Save previous recommendation if exists
-                if current_rec and len(current_rec) > 10:
-                    recommendations.append(current_rec)
-                current_rec = match.group(2).strip()
-            elif current_rec and line.strip() and not re.match(r'^\s*\d+\.', line):
-                # Continue current recommendation (multiline)
-                if len(current_rec) < 500:  # Prevent runaway concatenation
-                    current_rec += " " + line.strip()
-            elif current_rec:
-                # Empty line or new section - save current
-                if len(current_rec) > 10:
-                    recommendations.append(current_rec)
-                current_rec = None
-
-        # Save last recommendation
-        if current_rec and len(current_rec) > 10:
-            recommendations.append(current_rec)
+        recommendations = self._extract_recommendations(response)
 
         # Extract confidence with better validation
-        confidence = 0.8  # Default
-        conf_pattern = r'confidence[:\s]+([0-9]+\.?[0-9]*)'
-        conf_match = re.search(conf_pattern, response.lower())
-        if conf_match:
-            try:
-                conf_str = conf_match.group(1)
-                # Validate it's a proper decimal
-                if conf_str.count('.') <= 1:
-                    confidence = float(conf_str)
-                    # Normalize to 0.0-1.0 range
-                    if confidence > 1.0:
-                        confidence = min(confidence / 100.0, 1.0)
-                    # Clamp to valid range
-                    confidence = max(0.0, min(confidence, 1.0))
-                else:
-                    logger.warning("invalid_confidence_format", value=conf_str)
-                    confidence = 0.8
-            except (ValueError, OverflowError) as e:
-                logger.warning("confidence_parse_failed",
-                              raw_value=conf_match.group(1),
-                              error=str(e))
-                confidence = 0.8
+        confidence = self._extract_confidence(response)
 
         # Extract sources/references with better validation
-        sources = []
-        source_pattern = r'https?://[^\s)<>"\']+[^\s)<>"\',.]'
-        potential_sources = re.findall(source_pattern, response)
-
-        for url in potential_sources:
-            # Clean up common trailing characters
-            url = url.rstrip('.,;:!?)')
-            # Basic validation
-            if len(url) > 10 and '.' in url:
-                sources.append(url)
-
-        sources = list(set(sources))  # Remove duplicates
+        sources = self._extract_sources(response)
 
         # The full response is the data
         data = {
@@ -490,21 +473,108 @@ Format your response clearly with sections."""
             "sources": sources
         }
 
-    @staticmethod
-    def _extract_key_points(text: str) -> List[str]:
-        """Extract bullet points or key statements"""
+    def _extract_recommendations(self, text: str) -> List[str]:
+        """Extract numbered recommendations from text"""
+        recommendations = []
+        lines = text.split('\n')
+        current_rec = None
+
+        for line in lines:
+            # Match numbered list items using pre-compiled pattern
+            match = self._NUMBERED_LIST_PATTERN.match(line)
+            if match:
+                # Save previous recommendation if exists
+                if current_rec and len(current_rec) > 10:
+                    recommendations.append(current_rec)
+                current_rec = match.group(2).strip()
+            elif current_rec and line.strip() and not self._NUMBERED_LIST_PATTERN.match(line):
+                # Continue current recommendation (multiline)
+                if len(current_rec) < 500:  # Prevent runaway concatenation
+                    current_rec += " " + line.strip()
+            elif current_rec:
+                # Empty line or new section - save current
+                if len(current_rec) > 10:
+                    recommendations.append(current_rec)
+                current_rec = None
+
+        # Save last recommendation
+        if current_rec and len(current_rec) > 10:
+            recommendations.append(current_rec)
+
+        return recommendations
+
+    def _extract_confidence(self, text: str) -> float:
+        """Extract confidence score from text"""
+        confidence = 0.8  # Default
+
+        conf_match = self._CONFIDENCE_PATTERN.search(text)
+        if conf_match:
+            try:
+                conf_str = conf_match.group(1)
+                # Validate it's a proper decimal
+                if conf_str.count('.') <= 1:
+                    confidence = float(conf_str)
+                    # Normalize to 0.0-1.0 range
+                    if confidence > 1.0:
+                        confidence = min(confidence / 100.0, 1.0)
+                    # Clamp to valid range
+                    confidence = max(0.0, min(confidence, 1.0))
+                else:
+                    logger.warning("invalid_confidence_format",
+                                  value=conf_str,
+                                  worker_type=self.worker_type.value)
+                    confidence = 0.8
+            except (ValueError, OverflowError) as e:
+                logger.warning("confidence_parse_failed",
+                              raw_value=conf_match.group(1),
+                              error=str(e),
+                              worker_type=self.worker_type.value)
+                confidence = 0.8
+
+        return confidence
+
+    def _extract_sources(self, text: str) -> List[str]:
+        """Extract URLs from text"""
+        sources = []
+
+        # Use pre-compiled pattern
+        potential_sources = self._URL_PATTERN.findall(text)
+
+        for url in potential_sources:
+            # Clean up common trailing characters
+            url = url.rstrip('.,;:!?)')
+            # Basic validation
+            if len(url) > 10 and '.' in url:
+                sources.append(url)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_sources = []
+        for source in sources:
+            if source not in seen:
+                seen.add(source)
+                unique_sources.append(source)
+
+        return unique_sources
+
+    def _extract_key_points(self, text: str) -> List[str]:
+        """
+        Extract bullet points or key statements
+        FIXED: Pre-compiled regex patterns for performance
+        """
         if not text or not isinstance(text, str):
             return []
 
         # Truncate extremely long text
-        if len(text) > 10000:
-            text = text[:10000]
+        max_length = 10000
+        if len(text) > max_length:
+            text = text[:max_length]
 
         key_points = []
-        # Look for bullet points
-        bullet_pattern = r'^[\s]*[•\-*]\s+(.+?)$'
+
+        # Look for bullet points using pre-compiled pattern
         for line in text.split('\n'):
-            match = re.match(bullet_pattern, line)
+            match = self._BULLET_PATTERN.match(line)
             if match:
                 cleaned = re.sub(r'\s+', ' ', match.group(1).strip())
                 if len(cleaned) > 10:
@@ -516,12 +586,12 @@ Format your response clearly with sections."""
                 'important', 'critical', 'recommend', 'should', 'must',
                 'key', 'essential', 'crucial', 'significant', 'note that'
             ]
-            # Compile keyword pattern once for efficiency
+            # Compile keyword pattern once
             keyword_pattern = re.compile('|'.join(re.escape(k) for k in strong_keywords), re.IGNORECASE)
 
-            # Split by sentence-ending punctuation
-            sentences = re.split(r'[.!?]+', text)
-            for sentence in sentences[:100]:  # Limit iterations to prevent slowdown
+            # Split by sentence-ending punctuation (limit complexity)
+            sentences = re.split(r'[.!?]+', text)[:100]  # Limit to 100 sentences
+            for sentence in sentences:
                 if keyword_pattern.search(sentence):
                     clean = sentence.strip()
                     if 20 <= len(clean) <= 200:

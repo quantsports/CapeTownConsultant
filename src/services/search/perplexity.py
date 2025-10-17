@@ -27,6 +27,8 @@ class PerplexitySearch(BaseSearchEngine):
         self._rate_limiter = None
         self._rate_limiter_loop = None
         self.http_client: Optional[httpx.AsyncClient] = None
+        if self.api_key is None:
+            raise ValueError("Perplexity API key not configured")
 
     @property
     def rate_limiter(self):
@@ -152,7 +154,7 @@ class PerplexitySearch(BaseSearchEngine):
                 }
 
                 payload = {
-                    "model": "llama-3.1-sonar-large-128k-online",
+                    "model": "sonar",
                     "messages": [
                         {
                             "role": "system",
@@ -161,7 +163,7 @@ class PerplexitySearch(BaseSearchEngine):
                         {"role": "user", "content": query}
                     ],
                     "temperature": 0.2,
-                    "max_tokens": 2048,
+                    "max_tokens": 1024,
                     "top_p": 0.9,
                     "return_citations": True,  # ✅ Changed to True to get citations
                     "search_recency_filter": "month",
