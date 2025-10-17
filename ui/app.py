@@ -1,6 +1,6 @@
 """
 Vector memory system using Pinecone
-Store and retrieve memories using semantic search with enhanced reliability
+Stores and retrieves memories using semantic search with enhanced reliability
 """
 
 import hashlib
@@ -53,7 +53,7 @@ class VectorMemory:
             return
 
         async with self._init_lock:
-            # Double-check after acquiring lock
+            # Double-check after acquiring a lock
             if self._initialized:
                 return
 
@@ -62,7 +62,7 @@ class VectorMemory:
                 return
 
             try:
-                # Initialize in executor to avoid blocking
+                # Initialize in the executor to avoid blocking
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     self._sync_initialize
@@ -80,7 +80,7 @@ class VectorMemory:
         self.index = self.pc.Index(self.index_name)
 
     def _ensure_index(self):
-        """Create Pinecone index if it doesn't exist"""
+        """Create a Pinecone index if it doesn't exist"""
         try:
             existing_indexes = self.pc.list_indexes().names()
             if self.index_name not in existing_indexes:
