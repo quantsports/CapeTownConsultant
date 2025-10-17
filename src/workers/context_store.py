@@ -118,14 +118,10 @@ class SharedContextStore:
     def get_relevant_context(self, worker_type: str) -> Dict[str, Any]:
         """Get context relevant to a specific worker"""
         # Base context
-        relevant = {
-            "query": self.context["query"],
-            "user_profile": self.context["user_profile"],
-            "parsed_query": self.context["parsed_query"]
-        }
+        relevant = {"query": self.context["query"], "user_profile": self.context["user_profile"],
+                    "parsed_query": self.context["parsed_query"], "other_worker_insights": []}
 
         # Add contributions from other workers that might be relevant
-        relevant["other_worker_insights"] = []
         for contrib in self.context["worker_contributions"]:
             if contrib.worker_type != worker_type:
                 relevant["other_worker_insights"].append({
