@@ -6,7 +6,7 @@ Modular architecture for production deployment
 __version__ = "3.0.0"
 __author__ = "CapeTownConsultant Team"
 
-__all__ = ["AutonomousAssistant", "Config"]
+__all__ = ["AutonomousAssistant", "config"]
 
 # Lazy attribute access to avoid circular imports while preserving public API
 # PEP 562: module-level __getattr__ is supported in Python 3.7+

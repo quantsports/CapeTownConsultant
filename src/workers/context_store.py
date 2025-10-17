@@ -44,6 +44,64 @@ class SharedContextStore:
         # Variables for template substitution
         self.variables = {}
 
+    @staticmethod
+    def validate_namespace(namespace: str) -> bool:
+        """
+        Validate namespace format for Pinecone compatibility
+
+        Args:
+            namespace: Namespace string to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if not namespace or not isinstance(namespace, str):
+            return False
+
+        # Pinecone namespace requirements
+        if len(namespace) > 512:
+            return False
+
+        # Check for valid characters (alphanumeric, hyphens, underscores, colons)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_:-]+$', namespace):
+            return False
+
+        return True
+
+    @staticmethod
+    def sanitize_user_id(user_id: str) -> str:
+        """
+        Sanitize user_id for use as namespace
+
+        Args:
+            user_id: Raw user identifier
+
+        Returns:
+            Sanitized user_id safe for namespace use
+        """
+        if not user_id or not isinstance(user_id, str):
+            raise ValueError("user_id must be a non-empty string")
+
+        # Remove whitespace and replace spaces with underscores
+        safe_id = user_id.strip().replace(" ", "_")
+
+        if not safe_id:
+            raise ValueError("user_id cannot be empty after sanitization")
+
+        # Remove invalid characters
+        import re
+        safe_id = re.sub(r'[^a-zA-Z0-9_:-]', '', safe_id)
+
+        if not safe_id:
+            raise ValueError("user_id contains no valid characters")
+
+        # Truncate if too long
+        if len(safe_id) > 500:  # Leave room for prefix like "user:"
+            safe_id = safe_id[:500]
+
+        return safe_id
+
     def initialize(self, query: str, user_profile: Dict):
         """Initialize context with query and user profile"""
         self.query = query
@@ -95,18 +153,66 @@ class SharedContextStore:
             "timestamp": datetime.now().isoformat()
         })
 
+    def add_tool_result(self, tool_name: str, result: Any):
+        """
+        Add tool result (alias for store_tool_result for backward compatibility)
+
+        Args:
+            tool_name: Name of the tool executed
+            result: Tool execution result
+        """
+        self.store_tool_result(tool_name, result)
+
+    def add_contribution(
+        self,
+        worker_type: str,
+        data: Dict[str, Any],
+        confidence: float,
+        sources: List[str]
+    ):
+        """
+        Add worker contribution to shared context
+
+        Args:
+            worker_type: Type of worker making contribution
+            data: Data/findings from the worker
+            confidence: Confidence score (0.0-1.0)
+            sources: List of sources used
+        """
+        # Store as worker insight
+        self.add_worker_insight(worker_type, {
+            "data": data,
+            "confidence": confidence,
+            "sources": sources
+        })
+
+        # Update confidence scores
+        self.confidence_scores[worker_type] = confidence
+
+        # Add sources with credibility based on confidence
+        for source in sources:
+            self.add_source(source, credibility=confidence, worker_type=worker_type)
+
     def set_synthesis(self, synthesis: Dict):
         """Store final synthesis"""
         self.synthesis = synthesis
         self.synthesis["timestamp"] = datetime.now().isoformat()
 
     def get_relevant_context(self, worker_type: str) -> Dict:
-        """Get relevant context for a specific worker"""
+        """
+        Get relevant context for a specific worker
+
+        Returns both 'prior_insights' and 'other_worker_insights' keys
+        for backward compatibility with different worker implementations.
+        """
+        other_insights = self._get_other_worker_insights(worker_type)
+
         return {
             "query": self.query,
             "user_profile": self.user_profile,
             "research_context": self.research_context,
-            "prior_insights": self._get_other_worker_insights(worker_type),
+            "prior_insights": other_insights,
+            "other_worker_insights": other_insights,  # Alias for compatibility
             "tool_results": self.tool_results,
             "sources_found": len(self.sources)
         }

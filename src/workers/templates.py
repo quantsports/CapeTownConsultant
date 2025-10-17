@@ -502,6 +502,28 @@ Provide:
             return []
 
     @staticmethod
+    def recommend_workers(
+        query: str,
+        max_workers: int = 3,
+        query_analysis: Optional[Dict] = None
+    ) -> List[WorkerType]:
+        """
+        Recommend workers based on query analysis
+
+        This is the main method called by orchestrator.
+        Delegates to recommend_workers_research for implementation.
+
+        Args:
+            query: User query
+            max_workers: Maximum number of workers to spawn
+            query_analysis: Optional pre-computed query analysis
+
+        Returns:
+            List of recommended worker types
+        """
+        return WorkerTemplates.recommend_workers_research(query, max_workers, query_analysis)
+
+    @staticmethod
     def recommend_workers_research(
         query: str,
         max_workers: int = 3,

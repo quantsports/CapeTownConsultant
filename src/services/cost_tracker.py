@@ -333,6 +333,19 @@ class CostTracker:
             "remaining": max(0, limit - current)
         }
 
+    async def get_daily_total(self, user_id: str) -> float:
+        """
+        Get total daily cost for a user
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Total cost for the current day in dollars
+        """
+        await self.load_user_costs(user_id)
+        return self.user_costs.get(user_id, 0.0)
+
     def estimate_completion_cost(
         self,
         messages: Union[str, List[Dict]],
@@ -378,3 +391,5 @@ class CostTracker:
             "characters": chars,
             "ratio": chars / tokens if tokens > 0 else 0
         }
+    
+    
