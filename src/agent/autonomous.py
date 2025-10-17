@@ -364,9 +364,9 @@ Always cite sources [1], [2]. Store important user info automatically."""
     async def _manage_conversation_history(self, user_id: str):
         """Manage conversation history to stay within token limits"""
         # Simple truncation strategy - keep system message and recent history
-        if len(self.conversation_history) > Config.MAX_HISTORY_MESSAGES:
+        if len(self.conversation_history) > Config.MAX_CONVERSATION_HISTORY:
             system_msg = self.conversation_history[0]
-            recent = self.conversation_history[-(Config.MAX_HISTORY_MESSAGES - 1):]
+            recent = self.conversation_history[-(Config.MAX_CONVERSATION_HISTORY - 1):]
             self.conversation_history = [system_msg] + recent
 
     async def _extract_memories(self, recent_messages: List[Dict], user_id: str):

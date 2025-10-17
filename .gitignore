@@ -180,3 +180,9 @@ test_results/
 # Keep Empty Directories
 # ============================================================================
 !.gitkeep
+
+
+# MyPy cache
+.mypy_cache/
+.dmypy.json
+dmypy.json

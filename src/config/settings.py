@@ -6,6 +6,7 @@ Centralized settings and environment variable handling
 import os
 import sys
 from pathlib import Path
+from typing import Dict, Any
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables at module import
@@ -15,7 +16,10 @@ load_dotenv(find_dotenv())
 class Config:
     """Centralized configuration for the assistant"""
 
+    # ========================================================================
     # API Keys
+    # ========================================================================
+
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
     SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
@@ -23,36 +27,62 @@ class Config:
     GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
     PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
+    # ========================================================================
     # Pinecone Configuration
+    # ========================================================================
+
     PINECONE_INDEX = os.getenv("PINECONE_INDEX", "assistant-memory")
     PINECONE_DIMENSION = 1536
+    PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
 
+    # ========================================================================
     # Model Configuration
+    # ========================================================================
+
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o")
     SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o-mini")
 
+    # ========================================================================
     # API Settings
+    # ========================================================================
+
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
     TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "30"))
+
+    # Conversation history limits
     MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "20"))
+    MAX_HISTORY_MESSAGES = MAX_CONVERSATION_HISTORY  # Alias for backward compatibility
+
     CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
     MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
 
+    # ========================================================================
     # Rate Limiting (requests per minute)
+    # ========================================================================
+
     OPENAI_RPM = int(os.getenv("OPENAI_RPM", "50"))
     SERPAPI_RPM = int(os.getenv("SERPAPI_RPM", "100"))
     PERPLEXITY_RPM = int(os.getenv("PERPLEXITY_RPM", "20"))
 
+    # ========================================================================
     # Memory Settings
+    # ========================================================================
+
     MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.65"))
     AUTO_MEMORY_EXTRACTION = os.getenv("AUTO_MEMORY_EXTRACTION", "True").lower() == "true"
 
+    # ========================================================================
     # Cost Tracking
+    # ========================================================================
+
     ENABLE_COST_TRACKING = os.getenv("ENABLE_COST_TRACKING", "True").lower() == "true"
     DAILY_BUDGET_LIMIT = float(os.getenv("DAILY_BUDGET_LIMIT", "5.0"))
 
+    # ========================================================================
     # Directory Paths
+    # ========================================================================
+
     BASE_DIR = Path(__file__).parent.parent.parent
     DATA_DIR = BASE_DIR / "data"
     PROFILE_DIR = DATA_DIR / "profiles"
@@ -61,11 +91,24 @@ class Config:
     EMBEDDING_CACHE_DIR = CACHE_DIR / "embeddings"
     LOG_DIR = CACHE_DIR / "logs"
 
-    # Logging
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    # ========================================================================
+    # Logging & Monitoring
+    # ========================================================================
 
-    # Metrics
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     METRICS_ENABLED = os.getenv("METRICS_ENABLED", "True").lower() == "true"
+
+    # ========================================================================
+    # Feature Flags
+    # ========================================================================
+
+    ENABLE_STREAMING = os.getenv("ENABLE_STREAMING", "True").lower() == "true"
+    ENABLE_ORCHESTRATION = os.getenv("ENABLE_ORCHESTRATION", "False").lower() == "true"
+    ENABLE_CONCURRENT_TOOLS = os.getenv("ENABLE_CONCURRENT_TOOLS", "True").lower() == "true"
+
+    # ========================================================================
+    # Validation Methods
+    # ========================================================================
 
     @classmethod
     def ensure_directories(cls):
@@ -86,7 +129,7 @@ class Config:
                 print(f"Warning: Could not create directory {directory}: {e}", file=sys.stderr)
 
     @classmethod
-    def validate_required_keys(cls) -> dict:
+    def validate_required_keys(cls) -> Dict[str, bool]:
         """Check which API keys are configured"""
         return {
             "openai": bool(cls.OPENAI_API_KEY),
@@ -122,7 +165,7 @@ class Config:
         return True
 
     @classmethod
-    def get_config_summary(cls) -> dict:
+    def get_config_summary(cls) -> Dict[str, Any]:
         """Get a summary of current configuration"""
         return {
             "api_keys": cls.validate_required_keys(),
@@ -134,14 +177,41 @@ class Config:
             "limits": {
                 "max_retries": cls.MAX_RETRIES,
                 "timeout": cls.TIMEOUT_SECONDS,
+                "max_history": cls.MAX_CONVERSATION_HISTORY,
                 "daily_budget": cls.DAILY_BUDGET_LIMIT,
+            },
+            "features": {
+                "streaming": cls.ENABLE_STREAMING,
+                "orchestration": cls.ENABLE_ORCHESTRATION,
+                "concurrent_tools": cls.ENABLE_CONCURRENT_TOOLS,
+                "cost_tracking": cls.ENABLE_COST_TRACKING,
+                "auto_memory": cls.AUTO_MEMORY_EXTRACTION,
             },
             "paths": {
                 "data": str(cls.DATA_DIR),
                 "cache": str(cls.CACHE_DIR),
+                "profiles": str(cls.PROFILE_DIR),
             }
         }
 
+    @classmethod
+    def get_attribute_safely(cls, attr_name: str, default: Any = None) -> Any:
+        """
+        Safely get a config attribute with fallback
+
+        Args:
+            attr_name: Attribute name to retrieve
+            default: Default value if attribute doesn't exist
+
+        Returns:
+            Attribute value or default
+        """
+        return getattr(cls, attr_name, default)
+
+
+# ============================================================================
+# Module Initialization
+# ============================================================================
 
 # Initialize directories on import
 try:
@@ -153,6 +223,3 @@ except Exception as e:
 if not Config.validate_critical_keys(warn=False):
     print("\n⚠️  Configuration Warning: OPENAI_API_KEY not found in environment", file=sys.stderr)
     print("Please set it in your .env file or environment variables\n", file=sys.stderr)
-
-
-

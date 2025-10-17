@@ -35,6 +35,12 @@ httpx
 aiofiles
 aiolimiter
 tenacity
+tiktoken
+asyncio
+# Data processing
+# beautifulsoup4
+# lxml
+
 
 # Wikipedia
 wikipedia
