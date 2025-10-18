@@ -1,26 +1,23 @@
 """
-Application configuration and settings
-Centralized configuration management with environment variable support
+Configuration settings
+Centralized configuration management
+UPDATED: Added Kagi FastGPT API configuration
 """
 
 import os
-import sys
 from pathlib import Path
-from typing import Dict, Any
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv(find_dotenv())
-
+load_dotenv()
 
 
 class Config:
-    """Application configuration"""
+    """Configuration constants and environment variables"""
 
-    # ========================================================================
+    # =========================================================================
     # API Keys
-    # ========================================================================
-
+    # =========================================================================
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
     SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
@@ -28,192 +25,148 @@ class Config:
     GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
     PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
-    # ========================================================================
-    # Model Configuration
-    # ========================================================================
+    # NEW: Kagi FastGPT API
+    KAGI_API_KEY = os.getenv("KAGI_API_KEY")
 
-    CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-2024-08-06")
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o-mini-2024-07-18")
+    # =========================================================================
+    # Models
+    # =========================================================================
+    CHAT_MODEL = "gpt-4o"
+    SUMMARY_MODEL = "gpt-4o-mini"
+    EMBEDDING_MODEL = "text-embedding-3-small"
 
-    # ========================================================================
-    # Pinecone Configuration
-    # ========================================================================
+    # =========================================================================
+    # Pinecone
+    # =========================================================================
+    PINECONE_INDEX = "assistant-memory"
+    PINECONE_DIMENSION = 1536
+    PINECONE_REGION = "us-east-1"
 
-    PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1-aws")
-    PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "research-assistant")
-    PINECONE_INDEX = os.getenv("PINECONE_INDEX", "research-assistant")
-    PINECONE_DIMENSION = int(os.getenv("PINECONE_DIMENSION", "1536"))
+    # =========================================================================
+    # Rate Limits (requests per minute)
+    # =========================================================================
+    OPENAI_RPM = 50
+    SERPAPI_RPM = 100
+    PERPLEXITY_RPM = 20
+    KAGI_RPM = 30  # NEW: Conservative rate limit for Kagi
 
-    # ========================================================================
-    # System Limits
-    # ========================================================================
+    # =========================================================================
+    # Costs (per 1000 tokens or per call)
+    # =========================================================================
+    # Note: These are also in CostTracker.COSTS for backward compatibility
+    # NEW: Kagi added to cost tracking
+    COST_GPT4O_INPUT = 0.0025
+    COST_GPT4O_OUTPUT = 0.01
+    COST_EMBEDDING = 0.00002
+    COST_SERPAPI = 0.002
+    COST_GOOGLE_SEARCH = 0.005
+    COST_PERPLEXITY = 0.001
+    COST_KAGI = 0.015  # NEW: $0.015 per query
 
-    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-    TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "30"))
-    MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "20"))
-    MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
+    # =========================================================================
+    # Thresholds
+    # =========================================================================
+    MEMORY_SIMILARITY_THRESHOLD = 0.7
+    MAX_CONTEXT_TOKENS = 8000
+    MAX_CONVERSATION_LENGTH = 20
+    MAX_CONVERSATION_HISTORY = 20  # Maximum messages to keep in conversation history
 
-    # ========================================================================
-    # Rate Limiting (requests per minute)
-    # ========================================================================
+    # =========================================================================
+    # Features
+    # =========================================================================
+    AUTO_MEMORY_EXTRACTION = True
+    ENABLE_COST_TRACKING = True
+    ENABLE_CACHING = True
 
-    OPENAI_RPM = int(os.getenv("OPENAI_RPM", "50"))
-    SERPAPI_RPM = int(os.getenv("SERPAPI_RPM", "100"))
-    PERPLEXITY_RPM = int(os.getenv("PERPLEXITY_RPM", "20"))
+    # =========================================================================
+    # Timeouts and Retries
+    # =========================================================================
+    TIMEOUT_SECONDS = 30.0
+    MAX_RETRIES = 3
 
-    # ========================================================================
-    # Memory Settings
-    # ========================================================================
+    # =========================================================================
+    # Budget
+    # =========================================================================
+    DAILY_BUDGET_LIMIT = 59999.0  # USD
 
-    MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.65"))
-    AUTO_MEMORY_EXTRACTION = os.getenv("AUTO_MEMORY_EXTRACTION", "True").lower() == "true"
-
-    # ========================================================================
-    # Cost Tracking
-    # ========================================================================
-
-    ENABLE_COST_TRACKING = os.getenv("ENABLE_COST_TRACKING", "True").lower() == "true"
-    DAILY_BUDGET_LIMIT = float(os.getenv("DAILY_BUDGET_LIMIT", "10.0"))
-
-    # ========================================================================
-    # Directory Paths
-    # ========================================================================
-
+    # =========================================================================
+    # Paths
+    # =========================================================================
     BASE_DIR = Path(__file__).parent.parent.parent
     DATA_DIR = BASE_DIR / "data"
+    CACHE_DIR = BASE_DIR / "cache"
+
     PROFILE_DIR = DATA_DIR / "profiles"
     CONVERSATION_DIR = DATA_DIR / "conversations"
-    CACHE_DIR = BASE_DIR / "cache"
+
     EMBEDDING_CACHE_DIR = CACHE_DIR / "embeddings"
+    COST_DIR = CACHE_DIR / "costs"
     LOG_DIR = CACHE_DIR / "logs"
 
-    # ========================================================================
-    # Logging & Monitoring
-    # ========================================================================
+    # Create directories
+    for directory in [
+        PROFILE_DIR,
+        CONVERSATION_DIR,
+        EMBEDDING_CACHE_DIR,
+        COST_DIR,
+        LOG_DIR
+    ]:
+        directory.mkdir(parents=True, exist_ok=True)
 
+    # =========================================================================
+    # Cache Settings
+    # =========================================================================
+    CACHE_MAX_SIZE = 1000
+    CACHE_TTL = 3600  # 1 hour
+
+    # =========================================================================
+    # Logging
+    # =========================================================================
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-    METRICS_ENABLED = os.getenv("METRICS_ENABLED", "True").lower() == "true"
+    LOG_FILE = LOG_DIR / "app.log"
+    ERROR_LOG_FILE = LOG_DIR / "errors.log"
 
-    # ========================================================================
-    # Feature Flags
-    # ========================================================================
-
-    ENABLE_STREAMING = os.getenv("ENABLE_STREAMING", "True").lower() == "true"
-    ENABLE_ORCHESTRATION = os.getenv("ENABLE_ORCHESTRATION", "True").lower() == "true"
-    ENABLE_CONCURRENT_TOOLS = os.getenv("ENABLE_CONCURRENT_TOOLS", "True").lower() == "true"
-
-    # ========================================================================
-    # Research-Specific Settings
-    # ========================================================================
-
-    ENABLE_ACADEMIC_SEARCH = os.getenv("ENABLE_ACADEMIC_SEARCH", "True").lower() == "true"
-    MAX_SOURCES_PER_WORKER = int(os.getenv("MAX_SOURCES_PER_WORKER", "10"))
-    MIN_SOURCE_CREDIBILITY = float(os.getenv("MIN_SOURCE_CREDIBILITY", "0.6"))
-    ENABLE_FACT_CHECKING = os.getenv("ENABLE_FACT_CHECKING", "True").lower() == "true"
-    DEFAULT_RESEARCH_DEPTH = os.getenv("DEFAULT_RESEARCH_DEPTH", "comprehensive")
-    MAX_WORKERS = int(os.getenv("MAX_WORKERS", "5"))
-
-    # ========================================================================
-    # Validation Methods
-    # ========================================================================
+    # =========================================================================
+    # Thresholds
+    # =========================================================================
+    MAX_ITERATIONS = 10  # Maximum iterations for autonomous agent tool execution loop
 
     @classmethod
-    def ensure_directories(cls):
-        """Create required directories if they don't exist"""
-        directories = [
-            cls.DATA_DIR,
-            cls.PROFILE_DIR,
-            cls.CONVERSATION_DIR,
-            cls.CACHE_DIR,
-            cls.EMBEDDING_CACHE_DIR,
-            cls.LOG_DIR,
-        ]
-
-        for directory in directories:
-            try:
-                directory.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                print(f"Warning: Could not create directory {directory}: {e}", file=sys.stderr)
-
-    @classmethod
-    def validate_required_keys(cls) -> Dict[str, bool]:
-        """Check which API keys are configured"""
-        return {
-            "openai": bool(cls.OPENAI_API_KEY),
-            "pinecone": bool(cls.PINECONE_API_KEY),
-            "serpapi": bool(cls.SERPAPI_API_KEY),
-            "google_search": bool(cls.GOOGLE_SEARCH_API_KEY and cls.GOOGLE_SEARCH_ENGINE_ID),
-            "perplexity": bool(cls.PERPLEXITY_API_KEY),
-        }
-
-    @classmethod
-    def validate_critical_keys(cls, warn: bool = True) -> bool:
+    def is_configured(cls, service: str) -> bool:
         """
-        Validate that critical API keys are present
+        Check if a service is configured
 
         Args:
-            warn: If True, print warnings for missing keys
+            service: Service name (openai, pinecone, serpapi, google, perplexity, kagi)
 
         Returns:
-            True if OpenAI key is present (minimum requirement)
+            True if API key is configured
         """
-        keys_status = cls.validate_required_keys()
-
-        if not keys_status["openai"]:
-            if warn:
-                print("ERROR: OPENAI_API_KEY is required but not configured", file=sys.stderr)
-            return False
-
-        if warn:
-            missing = [name for name, present in keys_status.items() if not present and name != "openai"]
-            if missing:
-                print(f"Warning: Optional API keys not configured: {', '.join(missing)}", file=sys.stderr)
-
-        return True
-
-    @classmethod
-    def get_config_summary(cls) -> Dict[str, Any]:
-        """Get a summary of current configuration"""
-        return {
-            "api_keys": cls.validate_required_keys(),
-            "models": {
-                "chat": cls.CHAT_MODEL,
-                "embedding": cls.EMBEDDING_MODEL,
-                "summary": cls.SUMMARY_MODEL,
-            },
-            "limits": {
-                "max_retries": cls.MAX_RETRIES,
-                "timeout": cls.TIMEOUT_SECONDS,
-                "max_history": cls.MAX_CONVERSATION_HISTORY,
-                "daily_budget": cls.DAILY_BUDGET_LIMIT,
-            },
-            "features": {
-                "streaming": cls.ENABLE_STREAMING,
-                "orchestration": cls.ENABLE_ORCHESTRATION,
-                "concurrent_tools": cls.ENABLE_CONCURRENT_TOOLS,
-                "cost_tracking": cls.ENABLE_COST_TRACKING,
-                "auto_memory": cls.AUTO_MEMORY_EXTRACTION,
-            },
-            "paths": {
-                "data": str(cls.DATA_DIR),
-                "cache": str(cls.CACHE_DIR),
-                "profiles": str(cls.PROFILE_DIR),
-            }
+        key_map = {
+            "openai": cls.OPENAI_API_KEY,
+            "pinecone": cls.PINECONE_API_KEY,
+            "serpapi": cls.SERPAPI_API_KEY,
+            "google": cls.GOOGLE_SEARCH_API_KEY and cls.GOOGLE_SEARCH_ENGINE_ID,
+            "perplexity": cls.PERPLEXITY_API_KEY,
+            "kagi": cls.KAGI_API_KEY,  # NEW
         }
 
+        value = key_map.get(service.lower())
+        return value is not None and value != ""
 
-# ============================================================================
-# Module Initialization
-# ============================================================================
+    @classmethod
+    def get_configured_services(cls) -> dict:
+        """
+        Get configuration status of all services
 
-# Initialize directories on import
-try:
-    Config.ensure_directories()
-except Exception as e:
-    print(f"Warning: Initialization error: {e}", file=sys.stderr)
-
-# Validate critical configuration
-if not Config.validate_critical_keys(warn=False):
-    print("\n⚠️  Configuration Warning: OPENAI_API_KEY not found in environment", file=sys.stderr)
-    print("Please set it in your .env file or environment variables\n", file=sys.stderr)
+        Returns:
+            Dictionary mapping service names to configuration status
+        """
+        return {
+            "openai": cls.is_configured("openai"),
+            "pinecone": cls.is_configured("pinecone"),
+            "serpapi": cls.is_configured("serpapi"),
+            "google": cls.is_configured("google"),
+            "perplexity": cls.is_configured("perplexity"),
+            "kagi": cls.is_configured("kagi"),  # NEW
+        }
