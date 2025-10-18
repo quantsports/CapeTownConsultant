@@ -29,7 +29,8 @@ pandas
 # Vector database
 chromadb
 pinecone
-
+numpy
+pandas
 # Async & HTTP
 httpx
 aiofiles
@@ -54,3 +55,34 @@ streamlit
 
 # Core Dependencies
 
+# Enhanced Streamlit UI Dependencies
+# Add these to your existing requirements.txt
+
+# Core Streamlit
+streamlit>=1.28.0
+
+# Enhanced UI Components
+streamlit-extras  # For add_vertical_space, colored_header, etc.
+streamlit-aggrid  # Advanced data tables
+# streamlit-plotly-events>=0.0.6  # Interactive charts
+
+# Visualization
+plotly
+altair  # Declarative visualizations
+
+# Progress and Animations
+streamlit-lottie>=0.0.5  # Animated icons
+st-annotated-text>=4.0.0  # Text highlighting
+
+# Layout and Design
+streamlit-card>=0.0.5  # Card components
+streamlit-timeline>=0.0.2  # Timeline visualizations
+
+# Optional: Advanced features
+streamlit-chat>=0.1.1  # Enhanced chat interface
+streamlit-ace>=0.1.1  # Code editor
+streamlit-echarts>=0.4.0  # Apache ECharts integration
+
+# Optional: Export capabilities
+reportlab>=4.0.0  # PDF generation
+markdown2>=2.4.10  # Enhanced markdown

@@ -14,6 +14,7 @@ class ToolType(str, Enum):
     WEB_SEARCH = "web_search"
     PERPLEXITY_SEARCH = "perplexity_search"
     GOOGLE_SEARCH = "google_search"
+    KAGI_SEARCH = "kagi_search"
     WIKI_FETCH = "wiki_fetch"
     MEMORY_QUERY = "memory_query"
     MEMORY_UPSERT = "memory_upsert"

@@ -17,8 +17,10 @@ class AutonomousAssistant:
         self,
         cost_tracker: Optional[CostTracker] = None,
         enable_streaming: bool = False,
-        enable_orchestration: bool = True
-    ):
+        enable_orchestration: bool = True,
+        api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+    ) -> None:
         """
         Initialize assistant
 
@@ -26,11 +28,15 @@ class AutonomousAssistant:
             cost_tracker: Cost tracking instance
             enable_streaming: Enable streaming responses
             enable_orchestration: Enable multi-agent orchestration (default: True)
+            api_key: Optional API key for LLM provider (alias for openai_api_key)
+            openai_api_key: Optional explicit OpenAI API key
         """
         self.cost_tracker = cost_tracker or CostTracker()
         self.agent: Optional[AutonomousAgent] = None
         self.enable_streaming = enable_streaming
         self.enable_orchestration = enable_orchestration
+        # Prefer explicit api_key if provided, else fall back to openai_api_key
+        self.openai_api_key: Optional[str] = api_key if api_key is not None else openai_api_key
 
     async def __aenter__(self):
         """Initialize agent with orchestration support"""

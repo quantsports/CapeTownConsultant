@@ -3,8 +3,7 @@ Interface package
 User-facing interfaces (CLI, API, etc.)
 """
 from src.interface.cli import run_cli, main
-from src.interface.assistant import AutonomousAssistant
-__all__ = ["AutonomousAssistant", "run_cli", "main"]
+__all__ = [ "run_cli", "main"]
 
 # Lazy attribute access to avoid circular imports
 # PEP 562: module-level __getattr__ is supported in Python 3.7+

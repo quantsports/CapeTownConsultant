@@ -34,6 +34,8 @@ class Config:
     CHAT_MODEL = "gpt-4o"
     SUMMARY_MODEL = "gpt-4o-mini"
     EMBEDDING_MODEL = "text-embedding-3-small"
+    # Backward compatibility alias for legacy references
+    OPENAI_MODEL = CHAT_MODEL
 
     # =========================================================================
     # Pinecone

@@ -14,7 +14,8 @@ from src.services.search import (
     WikipediaSearch,
     SerpAPISearch,
     GoogleSearch,
-    PerplexitySearch
+    PerplexitySearch,
+    KagiSearch
 )
 from src.memory import VectorMemory, ProfileManager, UnifiedMemorySystem
 from src.tools.schemas import ToolSchemas
@@ -38,6 +39,7 @@ class ToolExecutor:
         self.serpapi_search: Optional[SerpAPISearch] = None
         self.google_search: Optional[GoogleSearch] = None
         self.perplexity_search: Optional[PerplexitySearch] = None
+        self.kagi_search: Optional[KagiSearch] = None
 
         # Metrics tracking
         self.execution_metrics: Dict[str, Dict] = {}
@@ -49,6 +51,7 @@ class ToolExecutor:
             self.serpapi_search = await SerpAPISearch(self.cost_tracker).__aenter__()
             self.google_search = await GoogleSearch(self.cost_tracker).__aenter__()
             self.perplexity_search = await PerplexitySearch(self.cost_tracker).__aenter__()
+            self.kagi_search = await KagiSearch(self.cost_tracker).__aenter__()
             return self
         except Exception as e:
             # Cleanup partially initialized engines
@@ -61,7 +64,8 @@ class ToolExecutor:
             self.wiki_search,
             self.serpapi_search,
             self.google_search,
-            self.perplexity_search
+            self.perplexity_search,
+            self.kagi_search
         ]
 
         errors = []
@@ -80,6 +84,7 @@ class ToolExecutor:
         self.serpapi_search = None
         self.google_search = None
         self.perplexity_search = None
+        self.kagi_search = None
 
     @property
     def is_initialized(self) -> bool:
@@ -88,7 +93,8 @@ class ToolExecutor:
             self.wiki_search is not None,
             self.serpapi_search is not None,
             self.google_search is not None,
-            self.perplexity_search is not None
+            self.perplexity_search is not None,
+            self.kagi_search is not None
         ])
 
     def _sanitize_query(self, query: str, max_length: int = 500) -> str:
@@ -228,6 +234,7 @@ class ToolExecutor:
             ToolType.WEB_SEARCH.value: self.serpapi_search,
             ToolType.PERPLEXITY_SEARCH.value: self.perplexity_search,
             ToolType.GOOGLE_SEARCH.value: self.google_search,
+            ToolType.KAGI_SEARCH.value: self.kagi_search,
             ToolType.WIKI_FETCH.value: self.wiki_search,
         }
 
@@ -311,6 +318,14 @@ class ToolExecutor:
                 self._sanitize_query(arguments.get("query", "")),
                 user_id,
                 arguments.get("limit", 3)
+            )
+
+        elif tool_name == ToolType.KAGI_SEARCH.value:
+            # Kagi FastGPT supports allow_cache flag
+            return await self.kagi_search.search(
+                self._sanitize_query(arguments.get("query", "")),
+                user_id,
+                arguments.get("allow_cache", True)
             )
 
         elif tool_name == ToolType.MEMORY_QUERY.value:
