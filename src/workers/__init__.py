@@ -2,13 +2,21 @@
 Workers package
 Multi-agent orchestration with domain-specific workers
 """
+from src.orchestration.models import TaskPriority
+from src.workers.templates import WorkerTemplates
+from src.workers.context_store import SharedContextStore
+from src.workers.worker import BaseWorker, WorkerResult
+from src.workers.orchestrator import WorkerOrchestrator
+from src.workers.templates import WorkerType
 
 __all__ = [
     "WorkerOrchestrator",
     "BaseWorker",
     "WorkerResult",
     "SharedContextStore",
-    "WorkerTemplates"
+    "WorkerTemplates",
+    "TaskPriority",
+    "WorkerType"
 ]
 
 # Lazy exports to avoid circular imports
