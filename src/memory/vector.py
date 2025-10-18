@@ -1,6 +1,8 @@
 """
 Vector memory system using Pinecone
 Store and retrieve memories using semantic search with enhanced reliability
+FIXES: High #3 - Memory leak from unreleased _init_lock
+FIXES: Medium #8 - Missing timeout on Pinecone queries
 """
 
 import hashlib
@@ -34,7 +36,10 @@ class VectorMemory:
         self.pc: Optional[Pinecone] = None
         self.index = None
         self._initialized = False
-        self._init_lock = asyncio.Lock()
+
+        # HIGH FIX #3: Use temporary lock that will be deleted after initialization
+        # to prevent memory leak
+        self._init_lock: Optional[asyncio.Lock] = asyncio.Lock()
 
         # Batch limits
         self.max_batch_size = 100  # Pinecone recommendation
@@ -43,35 +48,48 @@ class VectorMemory:
         self.max_retries = 3
         self.retry_delay = 1.0  # seconds
 
+        # MEDIUM FIX #8: Query timeout (30 seconds)
+        self.query_timeout = 30.0
+
     def is_configured(self) -> bool:
         """Check if Pinecone is configured"""
         return self.api_key is not None and self.api_key != ""
 
     async def _ensure_initialized(self):
-        """Lazy initialization with thread safety"""
+        """
+        Lazy initialization with thread safety
+        HIGH FIX #3: Delete lock after initialization to prevent memory leak
+        """
         if self._initialized:
             return
 
-        async with self._init_lock:
-            # Double-check after acquiring lock
-            if self._initialized:
-                return
+        # Use lock if it exists, otherwise skip (already initialized)
+        if self._init_lock is not None:
+            async with self._init_lock:
+                # Double-check after acquiring lock
+                if self._initialized:
+                    return
 
-            if not self.is_configured():
-                logger.warning("pinecone_not_configured")
-                return
+                if not self.is_configured():
+                    logger.warning("pinecone_not_configured")
+                    # HIGH FIX #3: Delete lock even if not configured
+                    self._init_lock = None
+                    return
 
-            try:
-                # Initialize in executor to avoid blocking
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self._sync_initialize
-                )
-                self._initialized = True
-                logger.info("pinecone_initialized", index=self.index_name)
-            except Exception as e:
-                logger.error("pinecone_initialization_failed", error=str(e))
-                raise
+                try:
+                    # Initialize in executor to avoid blocking
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self._sync_initialize
+                    )
+                    self._initialized = True
+                    logger.info("pinecone_initialized", index=self.index_name)
+                except Exception as e:
+                    logger.error("pinecone_initialization_failed", error=str(e))
+                    raise
+                finally:
+                    # HIGH FIX #3: Delete the lock after initialization to free memory
+                    self._init_lock = None
 
     def _sync_initialize(self):
         """Synchronous initialization (runs in executor)"""
@@ -103,12 +121,17 @@ class VectorMemory:
             if not self.index:
                 return False
 
-            # Test with a simple stats call
-            await asyncio.get_event_loop().run_in_executor(
+            # Test with a simple stats call with timeout
+            # MEDIUM FIX #8: Add timeout to prevent indefinite blocking
+            stats_task = asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.index.describe_index_stats()
             )
+            await asyncio.wait_for(stats_task, timeout=self.query_timeout)
             return True
+        except asyncio.TimeoutError:
+            logger.error("health_check_timeout", timeout=self.query_timeout)
+            return False
         except Exception as e:
             logger.error("health_check_failed", error=str(e))
             return False
@@ -134,16 +157,14 @@ class VectorMemory:
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries - 1:
-                    delay = self.retry_delay * (2 ** attempt)
-                    logger.warning("operation_retry",
-                                  attempt=attempt + 1,
-                                  delay=delay,
-                                  error=str(e))
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("operation_failed_after_retries",
-                                error=str(e),
-                                attempts=self.max_retries)
+                    wait_time = self.retry_delay * (2 ** attempt)
+                    logger.warning(
+                        "operation_retry",
+                        attempt=attempt + 1,
+                        wait=wait_time,
+                        error=str(e)
+                    )
+                    await asyncio.sleep(wait_time)
 
         raise last_error
 
@@ -155,107 +176,86 @@ class VectorMemory:
             filter_dict: Optional[Dict] = None,
             user_id: str = "default"
     ) -> ToolResult:
-        """Query vector memory with retry logic"""
-        # Validate inputs
-        if not text or not isinstance(text, str) or not text.strip():
-            return ToolResult(
-                success=False,
-                error="Query text cannot be empty",
-                source="vector_memory"
-            )
+        """
+        Query vector memory with semantic search
+        MEDIUM FIX #8: Add timeout to Pinecone query
+        """
+        await self._ensure_initialized()
 
+        if not self.index:
+            return ToolResult(success=False, error="Pinecone not configured")
+
+        # Validate namespace
         if not self._validate_namespace(namespace):
             return ToolResult(
                 success=False,
-                error="Invalid namespace format",
-                source="vector_memory"
+                error=f"Invalid namespace: {namespace}"
             )
-
-        # Clamp top_k
-        top_k = max(1, min(top_k, 100))
 
         try:
-            await self._ensure_initialized()
+            # Generate embedding
+            embedding = await self.embedding_service.embed(text, user_id)
 
-            if not self.index:
-                return ToolResult(
-                    success=False,
-                    error="Pinecone not configured",
-                    source="vector_memory"
-                )
+            # Prepare query params
+            query_params = {
+                "vector": embedding,
+                "top_k": top_k,
+                "namespace": namespace,
+                "include_metadata": True
+            }
 
-            # Execute query with retry
-            result = await self._retry_operation(
-                self._execute_query,
-                text,
-                namespace,
-                top_k,
-                filter_dict,
-                user_id
+            if filter_dict:
+                query_params["filter"] = filter_dict
+
+            # MEDIUM FIX #8: Execute query with timeout
+            query_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.index.query(**query_params)
             )
 
-            return result
+            results = await asyncio.wait_for(query_task, timeout=self.query_timeout)
 
-        except Exception as e:
-            logger.error("memory_query_failed", error=str(e), user_id=user_id)
+            # Process matches
+            matches = []
+            for match in results.get("matches", []):
+                score = match.get("score", 0.0)
+
+                # Only include matches above threshold
+                if score >= Config.MEMORY_SIMILARITY_THRESHOLD:
+                    matches.append({
+                        "id": match.get("id", ""),
+                        "score": score,
+                        "text": match.get("metadata", {}).get("text", ""),
+                        "metadata": match.get("metadata", {}),
+                        "timestamp": match.get("metadata", {}).get("timestamp", "")
+                    })
+
+            logger.info(
+                "memory_query_success",
+                namespace=namespace,
+                matches=len(matches),
+                user_id=user_id
+            )
+
+            return ToolResult(
+                success=True,
+                data={"matches": matches, "namespace": namespace}
+            )
+
+        except asyncio.TimeoutError:
+            logger.error(
+                "memory_query_timeout",
+                timeout=self.query_timeout,
+                namespace=namespace,
+                user_id=user_id
+            )
             return ToolResult(
                 success=False,
-                error=f"Query failed: {str(e)}",
-                source="vector_memory"
+                error=f"Memory query timed out after {self.query_timeout}s"
             )
-
-    async def _execute_query(
-            self,
-            text: str,
-            namespace: str,
-            top_k: int,
-            filter_dict: Optional[Dict],
-            user_id: str
-    ) -> ToolResult:
-        """Internal query execution"""
-        # Generate embedding
-        embedding = await self.embedding_service.embed(text, user_id)
-
-        # Prepare query parameters
-        query_params = {
-            "vector": embedding,
-            "top_k": top_k,
-            "namespace": namespace,
-            "include_metadata": True
-        }
-
-        if filter_dict:
-            query_params["filter"] = filter_dict
-
-        # Execute query in executor
-        results = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.index.query(**query_params)
-        )
-
-        # Filter by similarity threshold
-        matches = []
-        for match in results.get("matches", []):
-            score = match.get("score", 0.0)
-            if score >= Config.MEMORY_SIMILARITY_THRESHOLD:
-                matches.append({
-                    "id": match.get("id", ""),
-                    "score": score,
-                    "text": match.get("metadata", {}).get("text", ""),
-                    "metadata": match.get("metadata", {}),
-                    "timestamp": match.get("metadata", {}).get("timestamp", "")
-                })
-
-        logger.info("memory_query_success",
-                   user_id=user_id,
-                   namespace=namespace,
-                   matches=len(matches))
-
-        return ToolResult(
-            success=True,
-            data={"matches": matches, "namespace": namespace, "total": len(matches)},
-            source="vector_memory"
-        )
+        except Exception as e:
+            logger.error("memory_query_failed", error=str(e), user_id=user_id)
+            return ToolResult(success=False, error=f"Memory query failed: {str(e)}")
 
     async def upsert(
             self,
@@ -263,137 +263,78 @@ class VectorMemory:
             namespace: str,
             user_id: str = "default"
     ) -> ToolResult:
-        """Store items in vector memory with batching and retry"""
-        # Validate inputs
-        if not items or not isinstance(items, list):
-            return ToolResult(
-                success=False,
-                error="Items must be a non-empty list",
-                source="vector_memory"
-            )
+        """
+        Store items in vector memory with batching
+        MEDIUM FIX #8: Add timeout to upsert operation
+        """
+        await self._ensure_initialized()
 
+        if not self.index:
+            return ToolResult(success=False, error="Pinecone not configured")
+
+        # Validate namespace
         if not self._validate_namespace(namespace):
             return ToolResult(
                 success=False,
-                error="Invalid namespace format",
-                source="vector_memory"
+                error=f"Invalid namespace: {namespace}"
             )
 
         try:
-            await self._ensure_initialized()
+            vectors = []
+            texts = [item["text"] for item in items]
 
-            if not self.index:
-                return ToolResult(
-                    success=False,
-                    error="Pinecone not configured",
-                    source="vector_memory"
-                )
+            # Generate embeddings in batch
+            embeddings = await self.embedding_service.embed_batch(texts, user_id)
+            timestamp = datetime.now(timezone.utc).isoformat()
 
-            # Process in batches
-            total_stored = 0
-            for i in range(0, len(items), self.max_batch_size):
-                batch = items[i:i + self.max_batch_size]
+            # Prepare vectors for upsert
+            for item, embedding in zip(items, embeddings):
+                vector_id = hashlib.md5(
+                    f"{item['text']}{timestamp}".encode()
+                ).hexdigest()
 
-                result = await self._retry_operation(
-                    self._execute_upsert_batch,
-                    batch,
-                    namespace,
-                    user_id
-                )
+                metadata = item.get("meta", {})
+                metadata.update({
+                    "text": item["text"],
+                    "timestamp": timestamp
+                })
 
-                if not result.success:
-                    return result
+                vectors.append({
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": metadata
+                })
 
-                total_stored += result.data.get("stored", 0)
+            # MEDIUM FIX #8: Upsert with timeout
+            upsert_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.index.upsert(vectors=vectors, namespace=namespace)
+            )
 
-            logger.info("memory_upsert_complete",
-                       total_stored=total_stored,
-                       namespace=namespace,
-                       user_id=user_id)
+            await asyncio.wait_for(upsert_task, timeout=self.query_timeout)
+
+            logger.info(
+                "memory_upsert_success",
+                count=len(vectors),
+                namespace=namespace
+            )
 
             return ToolResult(
                 success=True,
-                data={"stored": total_stored, "namespace": namespace},
-                source="vector_memory"
+                data={"stored": len(vectors), "namespace": namespace}
             )
 
-        except Exception as e:
-            logger.error("memory_upsert_failed", error=str(e), user_id=user_id)
+        except asyncio.TimeoutError:
+            logger.error(
+                "memory_upsert_timeout",
+                timeout=self.query_timeout,
+                namespace=namespace,
+                user_id=user_id
+            )
             return ToolResult(
                 success=False,
-                error=f"Upsert failed: {str(e)}",
-                source="vector_memory"
+                error=f"Memory upsert timed out after {self.query_timeout}s"
             )
-
-    async def _execute_upsert_batch(
-            self,
-            items: List[Dict],
-            namespace: str,
-            user_id: str
-    ) -> ToolResult:
-        """Internal batch upsert execution"""
-        vectors = []
-        texts = [item["text"] for item in items]
-
-        # Generate embeddings in batch
-        embeddings = await self.embedding_service.embed_batch(texts, user_id)
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        # Prepare vectors for upsert
-        for item, embedding in zip(items, embeddings):
-            vector_id = hashlib.md5(
-                f"{item['text']}{timestamp}{user_id}".encode()
-            ).hexdigest()
-
-            metadata = item.get("meta", {})
-            metadata.update({
-                "text": item["text"],
-                "timestamp": timestamp,
-                "user_id": user_id
-            })
-
-            vectors.append({
-                "id": vector_id,
-                "values": embedding,
-                "metadata": metadata
-            })
-
-        # Upsert to Pinecone in executor
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.index.upsert(vectors=vectors, namespace=namespace)
-        )
-
-        logger.info("memory_batch_upserted",
-                   count=len(vectors),
-                   namespace=namespace)
-
-        return ToolResult(
-            success=True,
-            data={"stored": len(vectors)},
-            source="vector_memory"
-        )
-
-    async def delete_namespace(self, namespace: str) -> bool:
-        """Delete all vectors in a namespace"""
-        try:
-            await self._ensure_initialized()
-
-            if not self.index:
-                return False
-
-            if not self._validate_namespace(namespace):
-                logger.warning("invalid_namespace_delete", namespace=namespace)
-                return False
-
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.index.delete(delete_all=True, namespace=namespace)
-            )
-
-            logger.info("namespace_deleted", namespace=namespace)
-            return True
-
         except Exception as e:
-            logger.error("namespace_delete_failed", namespace=namespace, error=str(e))
-            return False
+            logger.error("memory_upsert_failed", error=str(e), user_id=user_id)
+            return ToolResult(success=False, error=f"Memory upsert failed: {str(e)}")

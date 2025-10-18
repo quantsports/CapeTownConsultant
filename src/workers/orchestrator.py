@@ -528,3 +528,27 @@ Be concise, strategic, and practical."""
             explanation.append(f"   Tools: {', '.join(template.get('tools', []))}\n")
 
         return "\n".join(explanation)
+
+    def add_tool_result(self, tool_name: str, result: Any):
+        """
+        Store tool execution result
+
+        Args:
+            tool_name: Name of the tool executed
+            result: Tool execution result
+        """
+        if not hasattr(self, "tool_results"):
+            self.tool_results = {}
+
+        if tool_name not in self.tool_results:
+            self.tool_results[tool_name] = []
+
+        self.tool_results[tool_name].append(
+            {"result": result, "timestamp": datetime.now().isoformat()}
+        )
+
+        logger.debug(
+            "tool_result_stored",
+            tool_name=tool_name,
+            result_count=len(self.tool_results[tool_name]),
+        )

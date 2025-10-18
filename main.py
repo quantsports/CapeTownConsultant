@@ -86,7 +86,7 @@ class TestRunner:
             },
             {
                 "query": "Search for average restaurant startup costs in South Africa",
-                "expected_tool": "web_search",
+                "expected_tool": "kagi_search",
                 "description": "Web search test - financial information",
             },
             {
@@ -103,6 +103,26 @@ class TestRunner:
                 "query": "Give me a comprehensive analysis of sustainable restaurant practices",
                 "expected_tool": "perplexity_search",
                 "description": "Perplexity test - comprehensive analysis",
+            },
+            {
+                "query": "What is Table Mountain?",
+                "expected_tool": "wiki_fetch",
+                "description": "Wikipedia test - encyclopedic knowledge (free)",
+            },
+            {
+                "query": "Tell me about the history of Cape Town from Wikipedia",
+                "expected_tool": "wiki_fetch",
+                "description": "Wikipedia test - historical information",
+            },
+            {
+                "query": "Use Kagi to find the latest AI developments in 2025",
+                "expected_tool": "kagi_search",
+                "description": "Kagi test - AI-synthesized answer with live search",
+            },
+            {
+                "query": "What are the economic impacts of tourism in South Africa? Use Kagi for comprehensive analysis.",
+                "expected_tool": "kagi_search",
+                "description": "Kagi test - complex synthesis with citations",
             },
         ]
 
@@ -151,6 +171,7 @@ class TestRunner:
                 "SerpAPI": Config.SERPAPI_API_KEY,
                 "Perplexity": Config.PERPLEXITY_API_KEY,
                 "Google Search": Config.GOOGLE_SEARCH_API_KEY,
+                "Kagi": Config.KAGI_API_KEY,
             }
 
             for name, key in optional_apis.items():
@@ -194,7 +215,7 @@ class TestRunner:
         expected_tool = test_case["expected_tool"]
         description = test_case["description"]
 
-        self.print_section(f"Test {index + 1}/12: {description}")
+        self.print_section(f"Test {index + 1}/{len(self.test_queries)}: {description}")
         self.print_info(f"Query: {query}")
         self.print_info(f"Expected tool: {expected_tool}")
 
@@ -260,6 +281,24 @@ class TestRunner:
                         self.print_success("Comprehensive response from Perplexity")
                     else:
                         self.print_warning("Response shorter than expected")
+
+                elif expected_tool == "kagi_search":
+                    if "source" in response_lower or "[" in response:
+                        self.print_success("Kagi search with citations detected")
+                    else:
+                        self.print_warning("No citations from Kagi detected")
+
+                    # Check for AI synthesis indicators
+                    if len(response) > 150:
+                        self.print_success("AI-synthesized answer detected")
+                    else:
+                        self.print_warning("Response shorter than expected for Kagi")
+
+                elif expected_tool == "wiki_fetch":
+                    if "wikipedia" in response_lower or len(response) > 100:
+                        self.print_success("Wikipedia content detected")
+                    else:
+                        self.print_warning("Wikipedia content unclear")
 
         except asyncio.TimeoutError:
             duration = (datetime.now() - start_time).total_seconds()
@@ -440,7 +479,6 @@ async def main():
     """Main entry point"""
     runner = TestRunner()
     await runner.run()
-
 
 if __name__ == "__main__":
     try:

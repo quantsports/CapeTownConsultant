@@ -5,7 +5,7 @@ Wikipedia search implementation
 import asyncio
 import time
 from typing import List, Optional, Dict
-
+from src.core.logging import logger
 from src.services.search.base import BaseSearchEngine
 from src.core.models import ToolResult
 from src.core.metrics import get_metrics
@@ -108,4 +108,25 @@ class WikipediaSearch(BaseSearchEngine):
                 success=False,
                 error=f"wikipedia failed: {e.__class__.__name__} - {str(e)}",
                 source="wikipedia"
+            )
+
+    async def wiki_fetch(self, query: str) -> ToolResult:
+        """Fetch Wikipedia content"""
+        try:
+            # Your Wikipedia API call here
+            result = await self.get_page_summary(query)
+
+            if not result:
+                return ToolResult(
+                    success=False, error="No Wikipedia results found", data={}
+                )
+
+            return ToolResult(
+                success=True, data=result, citations=[result.get("url", "")]
+            )
+
+        except Exception as e:
+            logger.error("wikipedia_fetch_failed", error=str(e))
+            return ToolResult(
+                success=False, error=f"Wikipedia fetch error: {str(e)}", data={}
             )

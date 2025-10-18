@@ -99,6 +99,8 @@ Remember: You are part of a larger research team. Focus on delivering high-quali
             AgentCapability.MEMORY: "Knowledge storage and retrieval",
             AgentCapability.COORDINATION: "Multi-agent task coordination",
             AgentCapability.GENERAL: "General-purpose task execution",
+            AgentCapability.SEARCH: "Search the internet using Kagi search",
+            AgentCapability.PERPLEXITY: 'Perplexity research'
         }
         return descriptions.get(capability, "Unknown capability")
 
