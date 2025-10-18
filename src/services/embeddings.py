@@ -1,9 +1,9 @@
 """
 Embedding service
 Generate and cache embeddings using OpenAI
+FIXES: High #7 - Missing null validation in embed_batch
 """
 
-import asyncio
 from typing import List, Optional
 import aiolimiter
 from openai import AsyncOpenAI
@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config.settings import Config
 from src.core.cache import PersistentEmbeddingCache
+from src.core.logging import logger
 from src.services.cost_tracker import CostTracker
 
 
@@ -23,26 +24,12 @@ class EmbeddingService:
         self.cache = PersistentEmbeddingCache()
         self.cost_tracker = cost_tracker
         self._rate_limiter = None
-        self._rate_limiter_loop = None
 
     @property
     def rate_limiter(self):
-        """Get or create rate limiter for current event loop - thread-safe"""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create new limiter without loop reference
-            if self._rate_limiter is None:
-                self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
-            self._rate_limiter_loop = None
-            return self._rate_limiter
-
-        # Check if we're in a different event loop
-        if self._rate_limiter_loop is not current_loop:
-            # Create new rate limiter for this event loop
+        """Lazy-load rate limiter"""
+        if self._rate_limiter is None:
             self._rate_limiter = aiolimiter.AsyncLimiter(Config.OPENAI_RPM, 60)
-            self._rate_limiter_loop = current_loop
-        
         return self._rate_limiter
 
     @retry(
@@ -91,7 +78,10 @@ class EmbeddingService:
             texts: List[str],
             user_id: str = "default"
     ) -> List[List[float]]:
-        """Generate embeddings for multiple texts"""
+        """
+        Generate embeddings for multiple texts
+        HIGH FIX #7: Validate that no None values remain in results
+        """
         if not self.client:
             raise ValueError("OpenAI API key not configured")
 
@@ -107,7 +97,7 @@ class EmbeddingService:
             else:
                 to_embed.append(text[:8000])
                 indices.append(i)
-                results.append(None)
+                results.append(None)  # Placeholder
 
         # Generate embeddings for uncached texts
         if to_embed:
@@ -137,6 +127,25 @@ class EmbeddingService:
                         await self.cost_tracker.record_cost(user_id, "embedding", total_chars)
 
                 except Exception as e:
+                    logger.error(
+                        "batch_embedding_failed",
+                        error=str(e),
+                        texts_count=len(to_embed),
+                        user_id=user_id
+                    )
                     raise Exception(f"Batch embedding failed: {str(e)}")
+
+        # HIGH FIX #7: Validate that no None values remain
+        none_indices = [i for i, emb in enumerate(results) if emb is None]
+        if none_indices:
+            error_msg = f"Embedding generation failed for {len(none_indices)} texts at indices: {none_indices}"
+            logger.error(
+                "embedding_validation_failed",
+                none_count=len(none_indices),
+                total_count=len(results),
+                failed_indices=none_indices,
+                user_id=user_id
+            )
+            raise ValueError(error_msg)
 
         return results
