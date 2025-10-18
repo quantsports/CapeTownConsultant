@@ -28,6 +28,8 @@ class AgentCapability(Enum):
     MEMORY = "memory"  # Knowledge storage/retrieval
     COORDINATION = "coordination"  # Multi-agent orchestration
     GENERAL = "general"  # General-purpose tasks
+    SEARCH = "search" # Search the internet
+    PERPLEXITY = 'perplexity'
 
 
 class TaskPriority(Enum):
