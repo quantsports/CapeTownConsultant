@@ -2,7 +2,8 @@
 Interface package
 User-facing interfaces (CLI, API, etc.)
 """
-
+from src.interface.cli import run_cli, main
+from src.interface.assistant import AutonomousAssistant
 __all__ = ["AutonomousAssistant", "run_cli", "main"]
 
 # Lazy attribute access to avoid circular imports
