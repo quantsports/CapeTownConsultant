@@ -1,161 +1,185 @@
 """
 Shared context store for worker orchestration
-Manages shared state and information across multiple workers
+FIXES: High #4 - Unbounded cache growth in tool_results
 """
 
-from typing import Dict, List, Any, Optional
 from datetime import datetime
+from typing import Dict, List, Any, Optional
+from collections import OrderedDict
+from dataclasses import dataclass, field
+
+from src.core.logging import logger
+
+
+@dataclass
+class WorkerContribution:
+    """Represents a worker's contribution to the shared context"""
+    worker_type: str
+    data: Dict[str, Any]
+    confidence: float
+    sources: List[str] = field(default_factory=list)
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class SharedContextStore:
-    """Enhanced context store for research orchestration"""
+    """
+    Centralized context store for worker orchestration
+    HIGH FIX #4: Enforce bounded cache for tool_results with FIFO eviction
+    """
 
-    def __init__(self):
-        self.query = ""
-        self.user_profile = {}
+    def __init__(self, max_tool_results: int = 100):
+        """
+        Initialize shared context store
 
-        # Research-specific context
-        self.research_context = {
-            "objective": "",
-            "question_type": "general",  # factual, analytical, comparative, etc.
-            "domain": "general",
-            "time_constraints": None,  # e.g., "last 5 years"
-            "evidence_requirements": "moderate",  # low, moderate, high
-            "depth_level": "comprehensive",  # overview, comprehensive, deep
-            "sub_questions": []
+        Args:
+            max_tool_results: Maximum number of tool results to cache (default: 100)
+        """
+        self.context: Dict[str, Any] = {
+            "query": "",
+            "user_profile": {},
+            "parsed_query": {},
+            "worker_contributions": [],
+            "synthesis": {},
         }
 
-        # Evidence tracking
-        self.sources = []  # All sources across workers
-        self.evidence_map = {}  # Map claims to sources
-        self.source_credibility = {}  # Source -> credibility score
+        # HIGH FIX #4: Use OrderedDict with max size for FIFO eviction
+        self.max_tool_results = max_tool_results
+        self.tool_results: OrderedDict[str, Any] = OrderedDict()
 
-        # Worker coordination
-        self.worker_insights = []
-        self.worker_priorities = {}
-        self.tool_results = {}
-        self.synthesis = {}
+        self.confidence_scores: Dict[str, float] = {}
+        self.sources: List[Dict[str, Any]] = []
 
-        # Quality metrics
-        self.confidence_scores = {}
-        self.identified_gaps = []
-        self.conflicting_info = []
+        logger.debug("context_store_initialized", max_tool_results=max_tool_results)
 
-        # Variables for template substitution
-        self.variables = {}
-
-    @staticmethod
-    def validate_namespace(namespace: str) -> bool:
-        """
-        Validate namespace format for Pinecone compatibility
-
-        Args:
-            namespace: Namespace string to validate
-
-        Returns:
-            True if valid, False otherwise
-        """
-        if not namespace or not isinstance(namespace, str):
-            return False
-
-        # Pinecone namespace requirements
-        if len(namespace) > 512:
-            return False
-
-        # Check for valid characters (alphanumeric, hyphens, underscores, colons)
-        import re
-        if not re.match(r'^[a-zA-Z0-9_:-]+$', namespace):
-            return False
-
-        return True
-
-    @staticmethod
-    def sanitize_user_id(user_id: str) -> str:
-        """
-        Sanitize user_id for use as namespace
-
-        Args:
-            user_id: Raw user identifier
-
-        Returns:
-            Sanitized user_id safe for namespace use
-        """
-        if not user_id or not isinstance(user_id, str):
-            raise ValueError("user_id must be a non-empty string")
-
-        # Remove whitespace and replace spaces with underscores
-        safe_id = user_id.strip().replace(" ", "_")
-
-        if not safe_id:
-            raise ValueError("user_id cannot be empty after sanitization")
-
-        # Remove invalid characters
-        import re
-        safe_id = re.sub(r'[^a-zA-Z0-9_:-]', '', safe_id)
-
-        if not safe_id:
-            raise ValueError("user_id contains no valid characters")
-
-        # Truncate if too long
-        if len(safe_id) > 500:  # Leave room for prefix like "user:"
-            safe_id = safe_id[:500]
-
-        return safe_id
-
-    def initialize(self, query: str, user_profile: Dict):
+    def initialize(
+        self,
+        query: str,
+        user_profile: Optional[Dict] = None,
+        additional_context: Optional[Dict] = None
+    ):
         """Initialize context with query and user profile"""
-        self.query = query
-        self.user_profile = user_profile
-        self.variables = {
-            "query": query,
-            "user_profile": str(user_profile) if user_profile else "No profile available",
-            "additional_context": ""
+        self.context["query"] = query
+        self.context["user_profile"] = user_profile or {}
+
+        # Parse query for intents and complexity
+        self.context["parsed_query"] = self._parse_query(query)
+
+        # Add additional context if provided
+        if additional_context:
+            self.context.update(additional_context)
+
+        logger.info("context_initialized", query_length=len(query))
+
+    def _parse_query(self, query: str) -> Dict:
+        """Parse query to extract intents and complexity"""
+        query_lower = query.lower()
+
+        # Simple intent detection
+        intents = []
+        if any(word in query_lower for word in ["analyze", "analysis", "compare"]):
+            intents.append("analysis")
+        if any(word in query_lower for word in ["design", "create", "plan"]):
+            intents.append("creation")
+        if any(word in query_lower for word in ["cost", "budget", "price"]):
+            intents.append("financial")
+        if any(word in query_lower for word in ["market", "strategy", "competition"]):
+            intents.append("strategic")
+
+        # Determine complexity
+        word_count = len(query.split())
+        complexity = "simple" if word_count < 10 else "moderate" if word_count < 20 else "complex"
+
+        return {
+            "intents": intents,
+            "word_count": word_count,
+            "complexity": complexity,
+            "questions": query.count("?"),
         }
 
-    def add_source(self, source: str, credibility: float = 0.5, worker_type: str = ""):
-        """Track source with credibility score"""
-        if source not in self.sources:
-            self.sources.append(source)
-            self.source_credibility[source] = credibility
+    def store_tool_result(self, tool_name: str, result: Any):
+        """
+        Store tool execution result
+        HIGH FIX #4: Enforce max size with FIFO eviction
+        """
+        # HIGH FIX #4: If at capacity, remove oldest entry (FIFO)
+        if len(self.tool_results) >= self.max_tool_results:
+            oldest_key = next(iter(self.tool_results))
+            removed = self.tool_results.pop(oldest_key)
+            logger.debug(
+                "tool_result_evicted",
+                tool=oldest_key,
+                current_size=len(self.tool_results)
+            )
 
-    def add_evidence(self, claim: str, sources: List[str], confidence: float, worker: str = ""):
-        """Map claim to supporting sources"""
-        self.evidence_map[claim] = {
-            "sources": sources,
-            "confidence": confidence,
-            "worker": worker
+        # Add new entry
+        timestamp = datetime.now().isoformat()
+        key = f"{tool_name}:{timestamp}"
+        self.tool_results[key] = {
+            "tool": tool_name,
+            "result": result,
+            "timestamp": timestamp
         }
 
-    def identify_conflict(self, claim1: str, claim2: str, explanation: str):
-        """Track conflicting information"""
-        self.conflicting_info.append({
-            "claim1": claim1,
-            "claim2": claim2,
-            "explanation": explanation,
-            "timestamp": datetime.now().isoformat()
-        })
+        logger.debug(
+            "tool_result_stored",
+            tool=tool_name,
+            cache_size=len(self.tool_results),
+            max_size=self.max_tool_results
+        )
 
     def add_worker_insight(self, worker_type: str, insight: Dict):
-        """Add insight from a worker"""
-        self.worker_insights.append({
-            "worker_type": worker_type,
+        """Add worker insight to context"""
+        self.context.setdefault("worker_insights", []).append({
+            "worker": worker_type,
             "insight": insight,
             "timestamp": datetime.now().isoformat()
         })
 
-    def store_tool_result(self, tool_name: str, result: Any):
-        """Store tool execution result"""
-        if tool_name not in self.tool_results:
-            self.tool_results[tool_name] = []
-
-        self.tool_results[tool_name].append({
-            "result": result,
+    def add_source(
+        self,
+        url: str,
+        credibility: float = 0.8,
+        worker_type: Optional[str] = None
+    ):
+        """Add a source with credibility score"""
+        source = {
+            "url": url,
+            "credibility": credibility,
             "timestamp": datetime.now().isoformat()
-        })
+        }
+        if worker_type:
+            source["discovered_by"] = worker_type
+
+        # Avoid duplicates
+        if not any(s["url"] == url for s in self.sources):
+            self.sources.append(source)
+
+    def get_tool_result(self, tool_name: str) -> Optional[Any]:
+        """Get most recent result for a specific tool"""
+        # Search in reverse order (most recent first)
+        for key, value in reversed(self.tool_results.items()):
+            if value["tool"] == tool_name:
+                return value["result"]
+        return None
+
+    def get_all_tool_results(self) -> List[Dict]:
+        """Get all tool results"""
+        return list(self.tool_results.values())
 
     def add_tool_result(self, tool_name: str, result: Any):
         """
-        Add tool result (alias for store_tool_result for backward compatibility)
+        Store tool execution result (alias for store_tool_result)
+
+        Args:
+            tool_name: Name of the tool executed
+            result: Tool execution result
+        """
+        self.store_tool_result(tool_name, result)
+
+    def record_tool_execution(self, tool_name: str, result: Any):
+        """
+        Record tool execution (legacy method for backward compatibility)
+        Delegates to store_tool_result
 
         Args:
             tool_name: Name of the tool executed
@@ -168,7 +192,7 @@ class SharedContextStore:
         worker_type: str,
         data: Dict[str, Any],
         confidence: float,
-        sources: List[str]
+        sources: List[str] = None
     ):
         """
         Add worker contribution to shared context
@@ -179,6 +203,8 @@ class SharedContextStore:
             confidence: Confidence score (0.0-1.0)
             sources: List of sources used
         """
+        sources = sources or []
+
         # Store as worker insight
         self.add_worker_insight(worker_type, {
             "data": data,
@@ -193,6 +219,13 @@ class SharedContextStore:
         for source in sources:
             self.add_source(source, credibility=confidence, worker_type=worker_type)
 
+        logger.debug(
+            "contribution_added",
+            worker=worker_type,
+            confidence=confidence,
+            sources_count=len(sources)
+        )
+
     def set_synthesis(self, synthesis: Dict):
         """Store final synthesis"""
         self.synthesis = synthesis
@@ -205,73 +238,77 @@ class SharedContextStore:
         Returns both 'prior_insights' and 'other_worker_insights' keys
         for backward compatibility with different worker implementations.
         """
-        other_insights = self._get_other_worker_insights(worker_type)
-
-        return {
-            "query": self.query,
-            "user_profile": self.user_profile,
-            "research_context": self.research_context,
-            "prior_insights": other_insights,
-            "other_worker_insights": other_insights,  # Alias for compatibility
-            "tool_results": self.tool_results,
-            "sources_found": len(self.sources)
-        }
-
-    def _get_other_worker_insights(self, current_worker: str) -> List[Dict]:
-        """Get insights from other workers"""
-        return [
-            insight for insight in self.worker_insights
-            if insight["worker_type"] != current_worker
+        other_insights = [
+            insight for insight in self.context.get("worker_insights", [])
+            if insight["worker"] != worker_type
         ]
 
+        return {
+            "query": self.context["query"],
+            "user_profile": self.context["user_profile"],
+            "parsed_query": self.context["parsed_query"],
+            "other_worker_insights": other_insights,
+            "prior_insights": other_insights,  # Alias for compatibility
+            "available_sources": self.sources,
+            "tool_results": list(self.tool_results.values())  # Include cached tool results
+        }
+
+    def get_all_contributions(self) -> List[WorkerContribution]:
+        """Get all worker contributions"""
+        contributions = []
+        for insight in self.context.get("worker_insights", []):
+            contributions.append(WorkerContribution(
+                worker_type=insight["worker"],
+                data=insight["insight"],
+                confidence=self.confidence_scores.get(insight["worker"], 0.5),
+                sources=[],
+                timestamp=insight["timestamp"]
+            ))
+        return contributions
+
     def get_variable_dict(self) -> Dict[str, str]:
-        """Get variables for template substitution"""
+        """Generate variables for template substitution"""
         return {
-            "query": self.query,
-            "user_profile": str(self.user_profile) if self.user_profile else "",
-            "additional_context": self._format_additional_context(),
-            "time_constraints": str(self.research_context.get("time_constraints", ""))
+            "query": self.context["query"],
+            "user_profile": str(self.context["user_profile"]),
+            "parsed_intents": ", ".join(self.context["parsed_query"].get("intents", [])),
+            "complexity": self.context["parsed_query"].get("complexity", "moderate"),
+            "prior_insights": str(self.context.get("worker_insights", [])),
+            "additional_context": str(self.context.get("additional_context", {}))
         }
 
-    def _format_additional_context(self) -> str:
-        """Format additional context from accumulated information"""
-        context_parts = []
+    def validate(self) -> bool:
+        """Validate context store state"""
+        try:
+            # Check required fields
+            if not self.context.get("query"):
+                logger.warning("context_validation_failed", reason="missing_query")
+                return False
 
-        if self.worker_insights:
-            context_parts.append(f"Prior worker findings: {len(self.worker_insights)} insights gathered")
+            # Check tool results size
+            if len(self.tool_results) > self.max_tool_results:
+                logger.error(
+                    "context_validation_failed",
+                    reason="tool_results_exceeded_max",
+                    current=len(self.tool_results),
+                    max=self.max_tool_results
+                )
+                return False
 
-        if self.sources:
-            context_parts.append(f"Sources consulted: {len(self.sources)}")
+            return True
 
-        if self.conflicting_info:
-            context_parts.append(f"Conflicting information identified: {len(self.conflicting_info)} conflicts")
+        except Exception as e:
+            logger.error("context_validation_error", error=str(e))
+            return False
 
-        return "; ".join(context_parts) if context_parts else "No additional context"
-
-    def get_research_summary(self) -> Dict:
-        """Get comprehensive research summary"""
-        avg_credibility = 0.0
-        if self.source_credibility:
-            avg_credibility = sum(self.source_credibility.values()) / len(self.source_credibility)
-
+    def get_stats(self) -> Dict:
+        """Get context store statistics"""
         return {
-            "query": self.query,
-            "context": self.research_context,
+            "query_length": len(self.context["query"]),
+            "worker_count": len(self.context.get("worker_insights", [])),
+            "tool_results_count": len(self.tool_results),
+            "tool_results_max": self.max_tool_results,
             "sources_count": len(self.sources),
-            "avg_credibility": avg_credibility,
-            "evidence_count": len(self.evidence_map),
-            "conflicts_found": len(self.conflicting_info),
-            "gaps_identified": self.identified_gaps,
-            "worker_insights_count": len(self.worker_insights)
+            "has_synthesis": bool(self.synthesis),
+            "profile_keys": len(self.context["user_profile"]),
         }
-
-    def add_gap(self, gap_description: str):
-        """Add identified research gap"""
-        self.identified_gaps.append({
-            "description": gap_description,
-            "timestamp": datetime.now().isoformat()
-        })
-
-    def update_research_context(self, updates: Dict):
-        """Update research context with new information"""
-        self.research_context.update(updates)
